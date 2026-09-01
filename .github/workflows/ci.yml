@@ -3,8 +3,6 @@ name: Windows CI - Build
 on:
   push:
     branches: [ main, master ]
-    tags:
-      - 'v*'
   pull_request:
     branches: [ main, master ]
 
@@ -18,17 +16,11 @@ jobs:
     - name: Setup Visual Studio environment
       uses: microsoft/setup-msbuild@v1
 
-    - name: Install OpenSSL via vcpkg
-      run: |
-        git clone https://github.com/Microsoft/vcpkg.git
-        .\vcpkg\bootstrap-vcpkg.bat
-        .\vcpkg\vcpkg install openssl:x64-windows
-
     - name: Restore NuGet packages
-      run: nuget restore FileEncryptor.slnx -PackagesDirectory packages
+      run: nuget restore FileEncryptor.vcxproj -SolutionDirectory .
 
     - name: Build (Release x64)
-      run: msbuild FileEncryptor.slnx /p:Configuration=Release /p:Platform=x64 /p:VcpkgEnabled=true /p:VcpkgRoot=$(pwd)\vcpkg /m
+      run: msbuild FileEncryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m
 
     - name: Upload artifact
       if: success()
@@ -39,12 +31,4 @@ jobs:
           **/x64/Release/*.exe
           **/Release/*.exe
 
-    - name: Create Release and upload assets
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          **/x64/Release/*.exe
-          **/Release/*.exe
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# Note: OpenSSL dependency may require additional setup on the runner (vcpkg install openssl:x64-windows).
