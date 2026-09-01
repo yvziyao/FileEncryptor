@@ -16,11 +16,22 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v1
 
+    - name: Setup vcpkg and install OpenSSL
+      run: |
+        git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+        cd C:\vcpkg
+        .\bootstrap-vcpkg.bat
+        .\vcpkg.exe install openssl:x64-windows
+
     - name: Restore NuGet packages
       run: nuget restore FileEncryptor.vcxproj -PackagesDirectory packages
 
     - name: Build (Release x64)
-      run: msbuild FileEncryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+      run: |
+        set VCPKG_ROOT=C:\vcpkg
+        msbuild FileEncryptor.vcxproj /p:Configuration=Release /p:Platform=x64 \
+          /p:AdditionalIncludeDirectories="C:\\vcpkg\\installed\\x64-windows\\include;%(AdditionalIncludeDirectories)" \
+          /p:AdditionalLibraryDirectories="C:\\vcpkg\\installed\\x64-windows\\lib;%(AdditionalLibraryDirectories)" /m
 
     - name: Create GitHub Release and upload artifact
       uses: softprops/action-gh-release@v1
