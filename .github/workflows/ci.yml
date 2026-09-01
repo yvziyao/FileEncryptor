@@ -1,0 +1,34 @@
+name: Windows CI - Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Visual Studio environment
+      uses: microsoft/setup-msbuild@v1
+
+    - name: Restore NuGet packages
+      run: nuget restore FileEncryptor.vcxproj
+
+    - name: Build (Release x64)
+      run: msbuild FileEncryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+
+    - name: Upload artifact
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: FileEncryptor-artifact
+        path: |
+          **/x64/Release/*.exe
+          **/Release/*.exe
+
+# Note: OpenSSL dependency may require additional setup on the runner (vcpkg install openssl:x64-windows).

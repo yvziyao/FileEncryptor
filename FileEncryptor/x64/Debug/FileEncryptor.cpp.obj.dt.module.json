@@ -1,0 +1,14 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "FileEncryptor\\x64\\Debug\\FileEncryptor.obj",
+            "outputs": [
+                "FileEncryptor\\x64\\Debug\\FileEncryptor.cpp.obj.dt.module.json",
+                "FileEncryptor\\x64\\Debug\\FileEncryptor.cpp.obj.dt.d.json"
+            ],
+            "requires": []
+        }
+    ]
+}
