@@ -186,8 +186,13 @@
     <ResourceCompile Include="resource.rc" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".github\workflows\ci.yml" />
+    <None Include=".github\workflows\release.yml" />
+    <None Include=".gitignore" />
+    <None Include="LICENSE" />
     <None Include="NewFileEncryptor.vcxproj" />
     <None Include="packages.config" />
+    <None Include="README.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

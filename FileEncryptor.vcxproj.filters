@@ -56,5 +56,10 @@
   <ItemGroup>
     <None Include="packages.config" />
     <None Include="NewFileEncryptor.vcxproj" />
+    <None Include="README.md" />
+    <None Include=".github\workflows\ci.yml" />
+    <None Include=".gitignore" />
+    <None Include="LICENSE" />
+    <None Include=".github\workflows\release.yml" />
   </ItemGroup>
 </Project>
