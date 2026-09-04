@@ -1,4 +1,3 @@
-```markdown
 # FileEncryptor
 
 > 跨平台（Windows）文件加密工具，基于 Win32 原生实现。
