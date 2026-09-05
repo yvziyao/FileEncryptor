@@ -4,19 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FileEncryptor - 安全、高效的文件加密工具</title>
-    <!-- 使用优雅的 Inter 字体 -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
-    <!-- Font Awesome 图标库 (免费版本) -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background-color: #f8fafc;
@@ -26,14 +19,7 @@
             flex-direction: column;
             min-height: 100vh;
         }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 24px;
-        }
-
-        /* 头部导航 */
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
         header {
             padding: 20px 0;
             background-color: #ffffff;
@@ -44,26 +30,14 @@
             backdrop-filter: blur(8px);
             background-color: rgba(255, 255, 255, 0.85);
         }
-
         nav {
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
-
-        .logo {
-            font-weight: 700;
-            font-size: 1.3rem;
-            letter-spacing: -0.5px;
-        }
-        .logo i {
-            color: #2563eb;
-            margin-right: 8px;
-        }
-        .logo span {
-            color: #1e293b;
-        }
-
+        .logo { font-weight: 700; font-size: 1.3rem; letter-spacing: -0.5px; }
+        .logo i { color: #2563eb; margin-right: 8px; }
+        .logo span { color: #1e293b; }
         .nav-links a {
             color: #475569;
             text-decoration: none;
@@ -72,21 +46,9 @@
             transition: color 0.2s;
             margin-left: 24px;
         }
-        .nav-links a:hover {
-            color: #2563eb;
-        }
-
-        /* 主体内容 */
-        main {
-            flex: 1;
-        }
-
-        /* 核心区域 (Hero) */
-        .hero {
-            padding: 60px 0 40px 0;
-            text-align: center;
-        }
-
+        .nav-links a:hover { color: #2563eb; }
+        main { flex: 1; }
+        .hero { padding: 60px 0 40px 0; text-align: center; }
         .hero h1 {
             font-size: 2.8rem;
             font-weight: 700;
@@ -98,14 +60,7 @@
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
-
-        .hero p {
-            font-size: 1.2rem;
-            color: #475569;
-            max-width: 650px;
-            margin: 0 auto 32px auto;
-        }
-
+        .hero p { font-size: 1.2rem; color: #475569; max-width: 650px; margin: 0 auto 32px auto; }
         .download-buttons {
             display: flex;
             flex-wrap: wrap;
@@ -113,7 +68,6 @@
             gap: 16px;
             margin-bottom: 20px;
         }
-
         .btn {
             display: inline-flex;
             align-items: center;
@@ -127,7 +81,6 @@
             border: 1px solid transparent;
             cursor: pointer;
         }
-
         .btn-primary {
             background-color: #2563eb;
             color: white;
@@ -138,7 +91,6 @@
             transform: translateY(-2px);
             box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4);
         }
-
         .btn-outline {
             background-color: transparent;
             color: #334155;
@@ -148,7 +100,6 @@
             background-color: #f1f5f9;
             border-color: #94a3b8;
         }
-
         .btn-github {
             background-color: #1e293b;
             color: white;
@@ -157,7 +108,6 @@
             background-color: #0f172a;
             transform: translateY(-2px);
         }
-
         .badge {
             display: inline-block;
             background-color: #e2e8f0;
@@ -168,35 +118,15 @@
             border-radius: 30px;
             margin-bottom: 24px;
         }
-
-        .version-info {
-            font-size: 0.9rem;
-            color: #64748b;
-            margin-top: 8px;
-        }
-        .version-info i {
-            margin-right: 4px;
-        }
-
-        /* 功能特性 */
-        .features {
-            padding: 40px 0 60px 0;
-        }
-
-        .features h2 {
-            text-align: center;
-            font-weight: 600;
-            font-size: 2rem;
-            margin-bottom: 48px;
-            color: #0f172a;
-        }
-
+        .version-info { font-size: 0.9rem; color: #64748b; margin-top: 8px; }
+        .version-info i { margin-right: 4px; }
+        .features { padding: 40px 0 60px 0; }
+        .features h2 { text-align: center; font-weight: 600; font-size: 2rem; margin-bottom: 48px; color: #0f172a; }
         .features-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 30px;
         }
-
         .feature-card {
             background: white;
             padding: 28px 22px;
@@ -210,33 +140,11 @@
             transform: translateY(-6px);
             box-shadow: 0 12px 30px rgba(0, 0, 0, 0.06);
         }
-
-        .feature-icon {
-            font-size: 2rem;
-            color: #2563eb;
-            margin-bottom: 16px;
-        }
-
-        .feature-card h3 {
-            font-weight: 600;
-            font-size: 1.1rem;
-            margin-bottom: 8px;
-        }
-        .feature-card p {
-            color: #64748b;
-            font-size: 0.95rem;
-        }
-
-        /* 截图/展示区域 */
-        .screenshots {
-            padding: 20px 0 60px 0;
-            text-align: center;
-        }
-        .screenshots h2 {
-            font-weight: 600;
-            font-size: 2rem;
-            margin-bottom: 16px;
-        }
+        .feature-icon { font-size: 2rem; color: #2563eb; margin-bottom: 16px; }
+        .feature-card h3 { font-weight: 600; font-size: 1.1rem; margin-bottom: 8px; }
+        .feature-card p { color: #64748b; font-size: 0.95rem; }
+        .screenshots { padding: 20px 0 60px 0; text-align: center; }
+        .screenshots h2 { font-weight: 600; font-size: 2rem; margin-bottom: 16px; }
         .screenshot-grid {
             display: flex;
             flex-wrap: wrap;
@@ -260,25 +168,7 @@
             border: 1px solid #e2e8f0;
             display: block;
         }
-        .screenshot-item p {
-            margin-top: 12px;
-            font-weight: 500;
-            color: #334155;
-            font-size: 0.9rem;
-        }
-        /* 图片占位样式 - 实际使用时请替换 src */
-        .placeholder-img {
-            background: #e2e8f0;
-            height: 160px;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #94a3b8;
-            font-size: 0.9rem;
-        }
-
-        /* 安全提示 */
+        .screenshot-item p { margin-top: 12px; font-weight: 500; color: #334155; font-size: 0.9rem; }
         .security-note {
             background-color: #f1f5f9;
             padding: 24px 30px;
@@ -287,20 +177,8 @@
             max-width: 800px;
             border-left: 5px solid #2563eb;
         }
-        .security-note h4 {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-weight: 600;
-            margin-bottom: 6px;
-        }
-        .security-note p {
-            color: #334155;
-            font-size: 0.95rem;
-            margin-bottom: 0;
-        }
-
-        /* 页脚 */
+        .security-note h4 { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-bottom: 6px; }
+        .security-note p { color: #334155; font-size: 0.95rem; margin-bottom: 0; }
         footer {
             background-color: white;
             border-top: 1px solid #e2e8f0;
@@ -310,30 +188,75 @@
             font-size: 0.9rem;
             margin-top: 20px;
         }
-        footer a {
-            color: #2563eb;
-            text-decoration: none;
-        }
-        footer a:hover {
-            text-decoration: underline;
+        footer a { color: #2563eb; text-decoration: none; }
+        footer a:hover { text-decoration: underline; }
+        @media (max-width: 640px) {
+            .hero h1 { font-size: 2.2rem; }
+            .hero p { font-size: 1rem; }
+            .download-buttons .btn { width: 100%; justify-content: center; }
+            .nav-links a { margin-left: 16px; font-size: 0.85rem; }
         }
 
-        /* 响应式 */
-        @media (max-width: 640px) {
-            .hero h1 {
-                font-size: 2.2rem;
-            }
-            .hero p {
-                font-size: 1rem;
-            }
-            .download-buttons .btn {
-                width: 100%;
-                justify-content: center;
-            }
-            .nav-links a {
-                margin-left: 16px;
-                font-size: 0.85rem;
-            }
+        /* ===== 弹窗遮罩层样式 ===== */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            backdrop-filter: blur(4px);
+        }
+        .modal-overlay.active {
+            display: flex;
+        }
+        .modal-content {
+            background: white;
+            padding: 24px 24px 20px 24px;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 90vw;
+            max-height: 90vh;
+            position: relative;
+            animation: modalIn 0.25s ease;
+        }
+        @keyframes modalIn {
+            from { transform: scale(0.9); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+        .modal-content img {
+            display: block;
+            max-width: 100%;
+            max-height: 70vh;
+            height: auto;
+            border-radius: 8px;
+        }
+        .modal-close {
+            display: block;
+            margin: 14px auto 0 auto;
+            padding: 8px 28px;
+            background-color: #e2e8f0;
+            border: none;
+            border-radius: 30px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #334155;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .modal-close:hover {
+            background-color: #cbd5e1;
+        }
+        .modal-label {
+            text-align: center;
+            font-weight: 600;
+            font-size: 1rem;
+            color: #0f172a;
+            margin-bottom: 12px;
         }
     </style>
 </head>
@@ -342,9 +265,7 @@
 <header>
     <div class="container">
         <nav>
-            <div class="logo">
-                <i class="fas fa-lock"></i><span>FileEncryptor</span>
-            </div>
+            <div class="logo"><i class="fas fa-lock"></i><span>FileEncryptor</span></div>
             <div class="nav-links">
                 <a href="#features">功能</a>
                 <a href="#download">下载</a>
@@ -361,32 +282,27 @@
             <h1>FileEncryptor</h1>
             <p>基于 AES-256-CBC 与 PBKDF2 的流式文件加密工具。<br>为 Windows 提供简洁、高效的文件加解密体验。</p>
 
-            <!-- 下载区域 -->
-<div id="download" class="download-buttons">
-    <!-- GitHub 直链下载 -->
-    <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-primary">
-        <i class="fas fa-download"></i> 下载最新版 (v1.0.0)
-    </a>
-    <!-- Gitee 直链下载（国内高速） -->
-    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-outline">
-        <i class="fas fa-cloud-download-alt"></i> 国内高速下载
-    </a>
-    <!-- 跳转到 Gitee Releases 页面 -->
-    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="btn btn-outline" style="border-color: #c71d23; color: #c71d23;">
-        <i class="fas fa-tag"></i> Gitee Releases
-    </a>
-    <!-- 跳转到 GitHub Releases 页面 -->
-    <a href="https://github.com/yvziyao/FileEncryptor/releases" target="_blank" rel="noopener noreferrer" class="btn btn-github">
-        <i class="fab fa-github"></i> GitHub Releases
-    </a>
-    <a href="https://pan.baidu.com/s/1xJVxS5LmgUemQGVupk8HGg?pwd=f4nh" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
-        <i class="fas fa-cloud"></i> 百度网盘下载 (提取码: f4nh)
-    </a>
-</div>
+            <div id="download" class="download-buttons">
+                <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-primary">
+                    <i class="fas fa-download"></i> 下载最新版 (v1.0.0)
+                </a>
+                <a href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-outline">
+                    <i class="fas fa-cloud-download-alt"></i> 国内高速下载
+                </a>
+                <a href="https://gitee.com/yvziyao/FileEncryptor/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="btn btn-outline" style="border-color: #c71d23; color: #c71d23;">
+                    <i class="fas fa-tag"></i> Gitee Releases
+                </a>
+                <a href="https://github.com/yvziyao/FileEncryptor/releases" target="_blank" rel="noopener noreferrer" class="btn btn-github">
+                    <i class="fab fa-github"></i> GitHub Releases
+                </a>
+                <a href="https://pan.baidu.com/s/1xJVxS5LmgUemQGVupk8HGg?pwd=f4nh" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
+                    <i class="fas fa-cloud"></i> 百度网盘下载 (提取码: f4nh)
+                </a>
+            </div>
             <div class="version-info">
                 <i class="fas fa-info-circle"></i> 单文件 · 无需安装 · 支持 Windows 10/11
             </div>
-            <!-- 安全提示 -->
+
             <div class="security-note">
                 <h4><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i> 安全提示</h4>
                 <p>加密/解密完成后，程序会对原始文件进行随机数据覆盖并删除，尽力减少残留。建议在本地、非同步目录中使用。</p>
@@ -394,7 +310,6 @@
         </div>
     </section>
 
-    <!-- 功能特性 -->
     <section id="features" class="features">
         <div class="container">
             <h2>核心特性</h2>
@@ -433,28 +348,50 @@
         </div>
     </section>
 
-    <!-- 截图展示 -->
     <section id="screenshots" class="screenshots">
         <div class="container">
             <h2>应用预览</h2>
-            <p style="color: #64748b; margin-bottom: 10px;">简洁直观的加解密界面</p>
             <div class="screenshot-grid">
                 <div class="screenshot-item">
-    <img src="encrypt.png" alt="加密界面截图">
-    <p><i class="fas fa-lock" style="color:#2563eb;"></i> 加密文件界面</p>
-</div>
-              <div class="screenshot-item">
-    <img src="decrypt.png" alt="解密界面截图">
-    <p><i class="fas fa-unlock" style="color:#2563eb;"></i> 解密文件界面</p>
-</div>
-
-<div class="screenshot-item">
-    <img src="main.png" alt="主界面截图">
-    <p><i class="fas fa-window-restore" style="color:#2563eb;"></i> 主程序界面</p>
-</div>
+                    <img src="encrypt.png" alt="加密界面截图">
+                    <p><i class="fas fa-lock" style="color:#2563eb;"></i> 加密文件界面</p>
+                </div>
+                <div class="screenshot-item">
+                    <img src="decrypt.png" alt="解密界面截图">
+                    <p><i class="fas fa-unlock" style="color:#2563eb;"></i> 解密文件界面</p>
+                </div>
+                <div class="screenshot-item">
+                    <img src="main.png" alt="主界面截图">
+                    <p><i class="fas fa-window-restore" style="color:#2563eb;"></i> 主程序界面</p>
+                </div>
             </div>
         </div>
     </section>
+
+    <!-- 捐助区域 -->
+    <div class="container">
+        <div style="margin: 0 auto 40px auto; max-width: 600px; padding: 20px 28px; background: #ffffff; border-radius: 16px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); border: 1px solid #f1f5f9;">
+            <div style="display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;">
+                <span style="font-size: 1.5rem;">☕</span>
+                <span style="font-weight: 600; color: #0f172a; font-size: 1.05rem;">如果这个项目对你有帮助，欢迎请作者喝杯咖啡</span>
+            </div>
+            <div style="display: flex; justify-content: center; gap: 16px; margin-top: 14px; flex-wrap: wrap;">
+                <!-- 支付宝按钮：点击打开弹窗 -->
+                <a href="javascript:void(0)" onclick="showQR('zhifubao.jpg', '支付宝收款码')" style="display: inline-flex; align-items: center; justify-content: center; padding: 8px 28px; background-color: #1677ff; color: white; border-radius: 40px; text-decoration: none; font-weight: 600; font-size: 0.95rem; transition: all 0.25s ease; border: 1px solid transparent; min-width: 100px; cursor: pointer;" 
+                   onmouseover="this.style.backgroundColor='#0958d9';" onmouseout="this.style.backgroundColor='#1677ff';">
+                    支付宝
+                </a>
+                <!-- 微信按钮：点击打开弹窗 -->
+                <a href="javascript:void(0)" onclick="showQR('weixin.jpg', '微信收款码')" style="display: inline-flex; align-items: center; justify-content: center; padding: 8px 28px; background-color: #07c160; color: white; border-radius: 40px; text-decoration: none; font-weight: 600; font-size: 0.95rem; transition: all 0.25s ease; border: 1px solid transparent; min-width: 100px; cursor: pointer;"
+                   onmouseover="this.style.backgroundColor='#06ad56';" onmouseout="this.style.backgroundColor='#07c160';">
+                    微信
+                </a>
+            </div>
+            <p style="text-align: center; color: #94a3b8; font-size: 0.8rem; margin-top: 12px; margin-bottom: 0;">
+                您的支持是我持续维护的动力 ❤️
+            </p>
+        </div>
+    </div>
 </main>
 
 <footer>
@@ -469,6 +406,39 @@
         </p>
     </div>
 </footer>
+
+<!-- ===== 弹窗 HTML ===== -->
+<div class="modal-overlay" id="qrModal" onclick="closeQR(event)">
+    <div class="modal-content" onclick="event.stopPropagation();">
+        <div class="modal-label" id="modalLabel">收款码</div>
+        <img id="modalImage" src="" alt="收款码">
+        <button class="modal-close" onclick="closeQR()">关闭</button>
+    </div>
+</div>
+
+<!-- ===== 弹窗 JavaScript ===== -->
+<script>
+    function showQR(imageSrc, label) {
+        document.getElementById('modalImage').src = imageSrc;
+        document.getElementById('modalLabel').textContent = label;
+        document.getElementById('qrModal').classList.add('active');
+        document.body.style.overflow = 'hidden'; // 禁止页面滚动
+    }
+
+    function closeQR(event) {
+        // 如果 event 存在且点击的不是遮罩层本身，则不关闭（由 onclick 传递）
+        if (event && event.target !== event.currentTarget) return;
+        document.getElementById('qrModal').classList.remove('active');
+        document.body.style.overflow = '';
+    }
+
+    // 按 ESC 键关闭弹窗
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            closeQR();
+        }
+    });
+</script>
 
 </body>
 </html>
