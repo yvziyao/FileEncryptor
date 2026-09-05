@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="icon" href="favicon.ico" type="image/x-icon">
     <title>FileEncryptor - 安全、高效的文件加密工具</title>
+    <link rel="icon" href="favicon.ico" type="image/x-icon">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
@@ -212,9 +212,7 @@
             align-items: center;
             backdrop-filter: blur(4px);
         }
-        .modal-overlay.active {
-            display: flex;
-        }
+        .modal-overlay.active { display: flex; }
         .modal-content {
             background: white;
             padding: 24px 24px 20px 24px;
@@ -249,15 +247,44 @@
             cursor: pointer;
             transition: background-color 0.2s;
         }
-        .modal-close:hover {
-            background-color: #cbd5e1;
-        }
+        .modal-close:hover { background-color: #cbd5e1; }
         .modal-label {
             text-align: center;
             font-weight: 600;
             font-size: 1rem;
             color: #0f172a;
             margin-bottom: 12px;
+        }
+
+        /* ===== 深色模式适配 ===== */
+        @media (prefers-color-scheme: dark) {
+            body { background-color: #0f172a; color: #e2e8f0; }
+            header { background-color: rgba(15, 23, 42, 0.85); border-bottom-color: #334155; }
+            .logo span { color: #e2e8f0; }
+            .nav-links a { color: #94a3b8; }
+            .nav-links a:hover { color: #60a5fa; }
+            .hero h1 { background: linear-gradient(135deg, #e2e8f0, #60a5fa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+            .hero p { color: #94a3b8; }
+            .badge { background-color: #334155; color: #cbd5e1; }
+            .version-info { color: #94a3b8; }
+            .feature-card { background: #1e293b; border-color: #334155; }
+            .feature-card h3 { color: #e2e8f0; }
+            .feature-card p { color: #94a3b8; }
+            .screenshot-item { background: #1e293b; border-color: #334155; }
+            .screenshot-item p { color: #cbd5e1; }
+            .security-note { background-color: #1e293b; border-left-color: #60a5fa; }
+            .security-note h4 { color: #e2e8f0; }
+            .security-note p { color: #94a3b8; }
+            footer { background-color: #1e293b; border-top-color: #334155; color: #94a3b8; }
+            footer a { color: #60a5fa; }
+            .btn-outline { color: #cbd5e1; border-color: #475569; }
+            .btn-outline:hover { background-color: #334155; border-color: #64748b; }
+            .btn-github { background-color: #334155; color: #e2e8f0; }
+            .btn-github:hover { background-color: #475569; }
+            .modal-content { background: #1e293b; }
+            .modal-label { color: #e2e8f0; }
+            .modal-close { background-color: #334155; color: #cbd5e1; }
+            .modal-close:hover { background-color: #475569; }
         }
     </style>
 </head>
@@ -296,7 +323,7 @@
                 <a href="https://github.com/yvziyao/FileEncryptor/releases" target="_blank" rel="noopener noreferrer" class="btn btn-github">
                     <i class="fab fa-github"></i> GitHub Releases
                 </a>
-                <a href="https://pan.baidu.com/s/1xJVxS5LmgUemQGVupk8HGg?pwd=f4nh" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
+                <a href="https://pan.baidu.com/s/17diAUXH6KfcBxlhKylYoPQ?pwd=f4nh" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
                     <i class="fas fa-cloud"></i> 百度网盘下载 (提取码: f4nh)
                 </a>
             </div>
@@ -377,12 +404,10 @@
                 <span style="font-weight: 600; color: #0f172a; font-size: 1.05rem;">如果这个项目对你有帮助，欢迎请作者喝杯咖啡</span>
             </div>
             <div style="display: flex; justify-content: center; gap: 16px; margin-top: 14px; flex-wrap: wrap;">
-                <!-- 支付宝按钮：点击打开弹窗 -->
                 <a href="javascript:void(0)" onclick="showQR('zhifubao.jpg', '支付宝收款码')" style="display: inline-flex; align-items: center; justify-content: center; padding: 8px 28px; background-color: #1677ff; color: white; border-radius: 40px; text-decoration: none; font-weight: 600; font-size: 0.95rem; transition: all 0.25s ease; border: 1px solid transparent; min-width: 100px; cursor: pointer;" 
                    onmouseover="this.style.backgroundColor='#0958d9';" onmouseout="this.style.backgroundColor='#1677ff';">
                     支付宝
                 </a>
-                <!-- 微信按钮：点击打开弹窗 -->
                 <a href="javascript:void(0)" onclick="showQR('weixin.jpg', '微信收款码')" style="display: inline-flex; align-items: center; justify-content: center; padding: 8px 28px; background-color: #07c160; color: white; border-radius: 40px; text-decoration: none; font-weight: 600; font-size: 0.95rem; transition: all 0.25s ease; border: 1px solid transparent; min-width: 100px; cursor: pointer;"
                    onmouseover="this.style.backgroundColor='#06ad56';" onmouseout="this.style.backgroundColor='#07c160';">
                     微信
@@ -423,21 +448,15 @@
         document.getElementById('modalImage').src = imageSrc;
         document.getElementById('modalLabel').textContent = label;
         document.getElementById('qrModal').classList.add('active');
-        document.body.style.overflow = 'hidden'; // 禁止页面滚动
+        document.body.style.overflow = 'hidden';
     }
-
     function closeQR(event) {
-        // 如果 event 存在且点击的不是遮罩层本身，则不关闭（由 onclick 传递）
         if (event && event.target !== event.currentTarget) return;
         document.getElementById('qrModal').classList.remove('active');
         document.body.style.overflow = '';
     }
-
-    // 按 ESC 键关闭弹窗
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') {
-            closeQR();
-        }
+        if (e.key === 'Escape') closeQR();
     });
 </script>
 
