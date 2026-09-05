@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <winres.h>
 #include "resource.h"
+IDI_APPICON ICON "favicon.ico"
 /////////////////////////////////////////////////////////////////////////////
 // 中文(简体，中国) resources
 
@@ -20,14 +21,14 @@ STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 EXSTYLE WS_EX_DLGMODALFRAME
 FONT 11, "Segoe UI", 0, 0, 0x1
 BEGIN
-    LTEXT           "����:",IDC_PWD_LABEL,8,8,36,12
+    LTEXT           "    :",IDC_PWD_LABEL,8,8,36,12
     EDITTEXT        IDC_PWD_EDIT,56,6,128,14,ES_PASSWORD | ES_AUTOHSCROLL
-    LTEXT           "ȷ��:",IDC_PWD_LABEL2,8,30,36,12
+    LTEXT           "ȷ  :",IDC_PWD_LABEL2,8,30,36,12
     EDITTEXT        IDC_PWD_EDIT2,56,28,128,13,ES_PASSWORD | ES_AUTOHSCROLL
-    CONTROL         "��ʾ����",IDC_SHOW_PWD,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,56,46,84,14
+    CONTROL         "  ʾ    ",IDC_SHOW_PWD,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,56,46,84,14
     LTEXT           "",IDC_PWD_STRENGTH,144,52,48,14
-    DEFPUSHBUTTON   "ȷ��",IDOK,55,65,48,20
-    PUSHBUTTON      "ȡ��",IDCANCEL,122,66,48,20
+    DEFPUSHBUTTON   "ȷ  ",IDOK,55,65,48,20
+    PUSHBUTTON      "ȡ  ",IDCANCEL,122,66,48,20
 END
 
 
