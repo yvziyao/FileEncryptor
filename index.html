@@ -256,6 +256,18 @@
             margin-bottom: 12px;
         }
 
+        /* ===== 捐助区域样式 ===== */
+        .donate-box {
+            background: #ffffff;
+            border: 1px solid #f1f5f9;
+        }
+        .donate-title {
+            color: #0f172a;
+        }
+        .donate-hint {
+            color: #94a3b8;
+        }
+
         /* ===== 深色模式适配 ===== */
         @media (prefers-color-scheme: dark) {
             body { background-color: #0f172a; color: #e2e8f0; }
@@ -285,6 +297,17 @@
             .modal-label { color: #e2e8f0; }
             .modal-close { background-color: #334155; color: #cbd5e1; }
             .modal-close:hover { background-color: #475569; }
+            /* 捐助区域深色模式 */
+            .donate-box {
+                background: #1e293b !important;
+                border-color: #334155 !important;
+            }
+            .donate-title {
+                color: #e2e8f0 !important;
+            }
+            .donate-hint {
+                color: #94a3b8 !important;
+            }
         }
     </style>
 </head>
@@ -396,12 +419,12 @@
         </div>
     </section>
 
-    <!-- 捐助区域 -->
+    <!-- 捐助区域（已适配深色模式） -->
     <div class="container">
-        <div style="margin: 0 auto 40px auto; max-width: 600px; padding: 20px 28px; background: #ffffff; border-radius: 16px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); border: 1px solid #f1f5f9;">
+        <div class="donate-box" style="margin: 0 auto 40px auto; max-width: 600px; padding: 20px 28px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);">
             <div style="display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;">
                 <span style="font-size: 1.5rem;">☕</span>
-                <span style="font-weight: 600; color: #0f172a; font-size: 1.05rem;">如果这个项目对你有帮助，欢迎请作者喝杯咖啡</span>
+                <span class="donate-title" style="font-weight: 600; font-size: 1.05rem;">如果这个项目对你有帮助，欢迎请作者喝杯咖啡</span>
             </div>
             <div style="display: flex; justify-content: center; gap: 16px; margin-top: 14px; flex-wrap: wrap;">
                 <a href="javascript:void(0)" onclick="showQR('zhifubao.jpg', '支付宝收款码')" style="display: inline-flex; align-items: center; justify-content: center; padding: 8px 28px; background-color: #1677ff; color: white; border-radius: 40px; text-decoration: none; font-weight: 600; font-size: 0.95rem; transition: all 0.25s ease; border: 1px solid transparent; min-width: 100px; cursor: pointer;" 
@@ -413,7 +436,7 @@
                     微信
                 </a>
             </div>
-            <p style="text-align: center; color: #94a3b8; font-size: 0.8rem; margin-top: 12px; margin-bottom: 0;">
+            <p class="donate-hint" style="text-align: center; font-size: 0.8rem; margin-top: 12px; margin-bottom: 0;">
                 您的支持是我持续维护的动力 ❤️
             </p>
         </div>
