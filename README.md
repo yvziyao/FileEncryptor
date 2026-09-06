@@ -29,6 +29,55 @@
     - **加密**：点击“加密”按钮，选择要加密的文件并设置密码。
     - **解密**：点击“解密”按钮，选择加密后的文件（通常为 `.enc` 后缀）并输入正确的密码。
 
+## 命令行版本 (CLI)
+
+除了图形界面版本，本项目还提供了一个极简的命令行版本 `enc.cpp`，适合熟悉终端的用户或需要在服务器、远程环境中使用的场景。
+
+### 特点
+
+- **更好的兼容性**：支持 Windows 7/10/11、Linux、macOS 等主流操作系统
+- **跨平台支持**：同样的代码可在不同平台上编译运行
+- **轻量高效**：无图形界面依赖，资源占用更低
+- **脚本友好**：可轻松集成到自动化脚本中
+
+### 编译
+
+```bash
+# Linux / macOS / Windows (MSYS2 / Cygwin / WSL)
+g++ -std=c++17 enc.cpp -o enc -static -lssl -lcrypto -lws2_32 -lgdi32 -lcrypt32
+```
+
+> **注意**：编译需要 OpenSSL 开发库。  
+> - **Ubuntu/Debian**：`sudo apt install libssl-dev`  
+> - **Windows (MSYS2)**：`pacman -S mingw-w64-x86_64-openssl`  
+> - **macOS**：`brew install openssl`（可能需要指定 include 和 lib 路径）
+
+### 使用方法
+
+```bash
+# 加密文件（会提示输入密码并确认）
+./enc -e -i 文件路径
+
+# 解密文件（会提示输入密码）
+./enc -d -i 文件路径.enc
+```
+
+### 示例
+
+```bash
+# 加密 secret.txt → 生成 secret.txt.enc
+./enc -e -i secret.txt
+
+# 解密 secret.txt.enc → 恢复为 secret.txt
+./enc -d -i secret.txt.enc
+```
+
+### 安全说明
+
+命令行版本与图形界面版本使用**相同的加密算法**（AES-256-CBC + PBKDF2），加密后的文件可以在两个版本之间**互相解密**，无需担心兼容性问题。
+
+---
+
 ### 从源代码构建（开发者）
 
 #### 使用 Visual Studio 构建
