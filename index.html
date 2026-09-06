@@ -62,16 +62,26 @@
             background-clip: text;
         }
         .hero p { font-size: 1.2rem; color: #475569; max-width: 650px; margin: 0 auto 32px auto; }
+        
+        /* ===== 修改后的下载按钮区域 ===== */
         .download-buttons {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .download-row {
             display: flex;
             flex-wrap: wrap;
             justify-content: center;
             gap: 16px;
-            margin-bottom: 20px;
+            width: 100%;
         }
         .btn {
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 10px;
             padding: 12px 28px;
             border-radius: 40px;
@@ -89,7 +99,7 @@
         }
         .btn-primary:hover {
             background-color: #1d4ed8;
-            transform: translateY(-2px);
+            transform: translateY(-2px);  /* 仅主按钮保留上移动画 */
             box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4);
         }
         .btn-outline {
@@ -100,6 +110,7 @@
         .btn-outline:hover {
             background-color: #f1f5f9;
             border-color: #94a3b8;
+            /* 移除了 transform: translateY(-2px); */
         }
         .btn-github {
             background-color: #1e293b;
@@ -107,8 +118,24 @@
         }
         .btn-github:hover {
             background-color: #0f172a;
-            transform: translateY(-2px);
+            /* 移除了 transform: translateY(-2px); */
         }
+        .btn-primary-lg {
+            font-size: 1.15rem;
+            padding: 14px 40px;
+        }
+        .release-link {
+            color: #64748b;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+        .release-link:hover {
+            color: #2563eb;
+        }
+        /* ===== 修改结束 ===== */
+
         .badge {
             display: inline-block;
             background-color: #e2e8f0;
@@ -297,7 +324,6 @@
             .modal-label { color: #e2e8f0; }
             .modal-close { background-color: #334155; color: #cbd5e1; }
             .modal-close:hover { background-color: #475569; }
-            /* 捐助区域深色模式 */
             .donate-box {
                 background: #1e293b !important;
                 border-color: #334155 !important;
@@ -307,6 +333,12 @@
             }
             .donate-hint {
                 color: #94a3b8 !important;
+            }
+            .release-link {
+                color: #94a3b8;
+            }
+            .release-link:hover {
+                color: #60a5fa;
             }
         }
     </style>
@@ -333,23 +365,35 @@
             <h1>FileEncryptor</h1>
             <p>基于 AES-256-CBC 与 PBKDF2 的流式文件加密工具。<br>为 Windows 提供简洁、高效的文件加解密体验。</p>
 
+            <!-- ===== 修改后的下载区域 ===== -->
             <div id="download" class="download-buttons">
-                <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-primary">
-                    <i class="fas fa-download"></i> 下载最新版 (v1.0.0)
-                </a>
-                <a href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-outline">
-                    <i class="fas fa-cloud-download-alt"></i> 国内高速下载
-                </a>
-                <a href="https://gitee.com/yvziyao/FileEncryptor/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="btn btn-outline" style="border-color: #c71d23; color: #c71d23;">
-                    <i class="fas fa-tag"></i> Gitee Releases
-                </a>
-                <a href="https://github.com/yvziyao/FileEncryptor/releases" target="_blank" rel="noopener noreferrer" class="btn btn-github">
-                    <i class="fab fa-github"></i> GitHub Releases
-                </a>
-                <a href="https://pan.baidu.com/s/17diAUXH6KfcBxlhKylYoPQ?pwd=f4nh" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
-                    <i class="fas fa-cloud"></i> 百度网盘下载 (提取码: f4nh)
-                </a>
+                <!-- 第一行：推荐下载 -->
+                <div class="download-row">
+                    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-primary btn-primary-lg">
+                        <i class="fas fa-download"></i> 一键下载（推荐）
+                    </a>
+                </div>
+                <!-- 第二行：其他下载方式 -->
+                <div class="download-row">
+                    <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-outline">
+                        <i class="fab fa-github"></i> GitHub 下载
+                    </a>
+                    <a href="https://pan.baidu.com/s/17diAUXH6KfcBxlhKylYoPQ?pwd=f4nh" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
+                        <i class="fas fa-cloud"></i> 百度网盘下载 (提取码: f4nh)
+                    </a>
+                </div>
+                <!-- 第三行：Releases 页面链接（文字形式） -->
+                <div class="download-row" style="gap: 24px; margin-top: 4px;">
+                    <a href="https://github.com/yvziyao/FileEncryptor/releases" target="_blank" rel="noopener noreferrer" class="release-link">
+                        GitHub Releases
+                    </a>
+                    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="release-link">
+                        Gitee Releases
+                    </a>
+                </div>
             </div>
+            <!-- ===== 修改结束 ===== -->
+
             <div class="version-info">
                 <i class="fas fa-info-circle"></i> 单文件 · 无需安装 · 支持 Windows 10/11
             </div>
