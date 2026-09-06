@@ -4,7 +4,7 @@
 // 用法: 
 //   加密: enc -e -i 输入文件
 //   解密: enc -d -i 输入文件.enc
-
+#define NOMINMAX
 #define OPENSSL_API_COMPAT 0x10100000L
 #include <openssl/evp.h>
 #include <openssl/rand.h>
