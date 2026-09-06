@@ -62,14 +62,46 @@
             background-clip: text;
         }
         .hero p { font-size: 1.2rem; color: #475569; max-width: 650px; margin: 0 auto 32px auto; }
-        
-        /* ===== 修改后的下载按钮区域 ===== */
-        .download-buttons {
+
+        .version-tabs {
             display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 28px;
+        }
+        .version-tab {
+            padding: 8px 28px;
+            border-radius: 40px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            border: 2px solid #e2e8f0;
+            background: transparent;
+            color: #64748b;
+        }
+        .version-tab:hover {
+            border-color: #94a3b8;
+            color: #334155;
+        }
+        .version-tab.active {
+            border-color: #2563eb;
+            background: #2563eb;
+            color: white;
+        }
+        .version-tab i {
+            margin-right: 8px;
+        }
+
+        .download-buttons {
+            display: none;
             flex-direction: column;
             align-items: center;
             gap: 12px;
             margin-bottom: 20px;
+        }
+        .download-buttons.active {
+            display: flex;
         }
         .download-row {
             display: flex;
@@ -99,7 +131,7 @@
         }
         .btn-primary:hover {
             background-color: #1d4ed8;
-            transform: translateY(-2px);  /* 仅主按钮保留上移动画 */
+            transform: translateY(-2px);
             box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4);
         }
         .btn-outline {
@@ -110,7 +142,6 @@
         .btn-outline:hover {
             background-color: #f1f5f9;
             border-color: #94a3b8;
-            /* 移除了 transform: translateY(-2px); */
         }
         .btn-github {
             background-color: #1e293b;
@@ -118,7 +149,6 @@
         }
         .btn-github:hover {
             background-color: #0f172a;
-            /* 移除了 transform: translateY(-2px); */
         }
         .btn-primary-lg {
             font-size: 1.15rem;
@@ -134,7 +164,10 @@
         .release-link:hover {
             color: #2563eb;
         }
-        /* ===== 修改结束 ===== */
+
+        .version-desc {
+            margin-bottom: 24px;
+        }
 
         .badge {
             display: inline-block;
@@ -149,12 +182,23 @@
         .version-info { font-size: 0.9rem; color: #64748b; margin-top: 8px; }
         .version-info i { margin-right: 4px; }
         .features { padding: 40px 0 60px 0; }
-        .features h2 { text-align: center; font-weight: 600; font-size: 2rem; margin-bottom: 48px; color: #0f172a; }
+        .features h2 {
+            text-align: center;
+            font-weight: 700;
+            font-size: 2rem;
+            margin-bottom: 40px;
+            color: #0f172a;
+            letter-spacing: -0.5px;
+        }
+
         .features-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 30px;
+            max-width: 1200px;
+            margin: 0 auto;
         }
+
         .feature-card {
             background: white;
             padding: 28px 22px;
@@ -171,8 +215,15 @@
         .feature-icon { font-size: 2rem; color: #2563eb; margin-bottom: 16px; }
         .feature-card h3 { font-weight: 600; font-size: 1.1rem; margin-bottom: 8px; }
         .feature-card p { color: #64748b; font-size: 0.95rem; }
+
         .screenshots { padding: 20px 0 60px 0; text-align: center; }
-        .screenshots h2 { font-weight: 600; font-size: 2rem; margin-bottom: 16px; }
+        .screenshots.hidden { display: none; }
+        .screenshots h2 {
+            font-weight: 700;
+            font-size: 2rem;
+            margin-bottom: 16px;
+            letter-spacing: -0.5px;
+        }
         .screenshot-grid {
             display: flex;
             flex-wrap: wrap;
@@ -197,6 +248,7 @@
             display: block;
         }
         .screenshot-item p { margin-top: 12px; font-weight: 500; color: #334155; font-size: 0.9rem; }
+
         .security-note {
             background-color: #f1f5f9;
             padding: 24px 30px;
@@ -223,9 +275,13 @@
             .hero p { font-size: 1rem; }
             .download-buttons .btn { width: 100%; justify-content: center; }
             .nav-links a { margin-left: 16px; font-size: 0.85rem; }
+            .features-grid {
+                grid-template-columns: 1fr;
+                max-width: 400px;
+            }
         }
 
-        /* ===== 弹窗遮罩层样式 ===== */
+        /* ===== 弹窗遮罩层 ===== */
         .modal-overlay {
             display: none;
             position: fixed;
@@ -283,7 +339,6 @@
             margin-bottom: 12px;
         }
 
-        /* ===== 捐助区域样式 ===== */
         .donate-box {
             background: #ffffff;
             border: 1px solid #f1f5f9;
@@ -295,7 +350,6 @@
             color: #94a3b8;
         }
 
-        /* ===== 深色模式适配 ===== */
         @media (prefers-color-scheme: dark) {
             body { background-color: #0f172a; color: #e2e8f0; }
             header { background-color: rgba(15, 23, 42, 0.85); border-bottom-color: #334155; }
@@ -306,6 +360,9 @@
             .hero p { color: #94a3b8; }
             .badge { background-color: #334155; color: #cbd5e1; }
             .version-info { color: #94a3b8; }
+            .version-tab { border-color: #475569; color: #94a3b8; }
+            .version-tab:hover { border-color: #64748b; color: #cbd5e1; }
+            .version-tab.active { border-color: #60a5fa; background: #2563eb; color: white; }
             .feature-card { background: #1e293b; border-color: #334155; }
             .feature-card h3 { color: #e2e8f0; }
             .feature-card p { color: #94a3b8; }
@@ -340,6 +397,12 @@
             .release-link:hover {
                 color: #60a5fa;
             }
+            .features h2 {
+                color: #e2e8f0;
+            }
+            .screenshots h2 {
+                color: #e2e8f0;
+            }
         }
     </style>
 </head>
@@ -363,17 +426,29 @@
         <div class="container">
             <span class="badge"><i class="fas fa-shield-alt"></i> 开源 · 安全 · 便携</span>
             <h1>FileEncryptor</h1>
-            <p>基于 AES-256-CBC 与 PBKDF2 的流式文件加密工具。<br>为 Windows 提供简洁、高效的文件加解密体验。</p>
 
-            <!-- ===== 修改后的下载区域 ===== -->
-            <div id="download" class="download-buttons">
-                <!-- 第一行：推荐下载 -->
+            <div class="version-tabs">
+                <button class="version-tab active" data-version="gui" onclick="switchVersion('gui')">
+                    <i class="fas fa-desktop"></i> 图形界面
+                </button>
+                <button class="version-tab" data-version="cli" onclick="switchVersion('cli')">
+                    <i class="fas fa-terminal"></i> 命令行
+                </button>
+            </div>
+
+            <div id="desc-gui" class="version-desc">
+                <p>基于 AES-256-CBC 与 PBKDF2 的流式文件加密工具。<br>为 Windows 提供简洁、高效的文件加解密体验。</p>
+            </div>
+            <div id="desc-cli" class="version-desc" style="display: none;">
+                <p>极简命令行文件加密工具，基于 AES-256-CBC 与 PBKDF2。<br>支持 Windows / Linux / macOS，适合服务器、远程环境或脚本集成。</p>
+            </div>
+
+            <div id="download-gui" class="download-buttons active">
                 <div class="download-row">
                     <a href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-primary btn-primary-lg">
                         <i class="fas fa-download"></i> 一键下载（推荐）
                     </a>
                 </div>
-                <!-- 第二行：其他下载方式 -->
                 <div class="download-row">
                     <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-outline">
                         <i class="fab fa-github"></i> GitHub 下载
@@ -382,7 +457,6 @@
                         <i class="fas fa-cloud"></i> 百度网盘下载 (提取码: f4nh)
                     </a>
                 </div>
-                <!-- 第三行：Releases 页面链接（文字形式） -->
                 <div class="download-row" style="gap: 24px; margin-top: 4px;">
                     <a href="https://github.com/yvziyao/FileEncryptor/releases" target="_blank" rel="noopener noreferrer" class="release-link">
                         GitHub Releases
@@ -392,10 +466,33 @@
                     </a>
                 </div>
             </div>
-            <!-- ===== 修改结束 ===== -->
+
+            <div id="download-cli" class="download-buttons">
+                <div class="download-row">
+                    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/enc.exe" class="btn btn-primary btn-primary-lg">
+                        <i class="fas fa-download"></i> 一键下载（推荐）
+                    </a>
+                </div>
+                <div class="download-row">
+                    <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/enc.exe" class="btn btn-outline">
+                        <i class="fab fa-github"></i> GitHub 下载
+                    </a>
+                    <a href="https://pan.baidu.com/s/1YLx0_rouk_jQPlchDMIwjg?pwd=drqp" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
+                        <i class="fas fa-cloud"></i> 百度网盘下载 (提取码: drqp)
+                    </a>
+                </div>
+                <div class="download-row" style="gap: 24px; margin-top: 4px;">
+                    <a href="https://github.com/yvziyao/FileEncryptor/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="release-link">
+                        GitHub Releases
+                    </a>
+                    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="release-link">
+                        Gitee Releases
+                    </a>
+                </div>
+            </div>
 
             <div class="version-info">
-                <i class="fas fa-info-circle"></i> 单文件 · 无需安装 · 支持 Windows 10/11
+                <i class="fas fa-info-circle"></i> <span id="version-detail">单文件 · 无需安装 · 支持 Windows 10/11</span>
             </div>
 
             <div class="security-note">
@@ -405,10 +502,12 @@
         </div>
     </section>
 
+    <!-- ===== 功能特性 ===== -->
     <section id="features" class="features">
         <div class="container">
             <h2>核心特性</h2>
-            <div class="features-grid">
+            <div class="features-grid" id="featuresGrid">
+                <!-- 图形界面版卡片（默认显示） -->
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-key"></i></div>
                     <h3>强加密算法</h3>
@@ -443,6 +542,7 @@
         </div>
     </section>
 
+    <!-- ===== 应用预览（截图） ===== -->
     <section id="screenshots" class="screenshots">
         <div class="container">
             <h2>应用预览</h2>
@@ -463,7 +563,7 @@
         </div>
     </section>
 
-    <!-- 捐助区域（已适配深色模式） -->
+    <!-- 捐助区域 -->
     <div class="container">
         <div class="donate-box" style="margin: 0 auto 40px auto; max-width: 600px; padding: 20px 28px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);">
             <div style="display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;">
@@ -500,7 +600,7 @@
     </div>
 </footer>
 
-<!-- ===== 弹窗 HTML ===== -->
+<!-- ===== 弹窗 ===== -->
 <div class="modal-overlay" id="qrModal" onclick="closeQR(event)">
     <div class="modal-content" onclick="event.stopPropagation();">
         <div class="modal-label" id="modalLabel">收款码</div>
@@ -509,8 +609,100 @@
     </div>
 </div>
 
-<!-- ===== 弹窗 JavaScript ===== -->
+<!-- ===== JavaScript ===== -->
 <script>
+    // 两个版本对应的卡片 HTML
+    const cliCards = `
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-key"></i></div>
+            <h3>强加密算法</h3>
+            <p>AES-256-CBC 结合 PBKDF2-HMAC-SHA256 密钥派生，安全可靠。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-hdd"></i></div>
+            <h3>大文件支持</h3>
+            <p>流式分块加/解密，内存占用低，轻松处理大文件。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-terminal"></i></div>
+            <h3>极简命令行</h3>
+            <p>轻量无依赖，适合远程服务器、自动化脚本和批量处理。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-crosshairs"></i></div>
+            <h3>隐藏密码输入</h3>
+            <p>输入密码时不回显字符，支持密码确认（加密模式），防止窥屏。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
+            <h3>安全删除</h3>
+            <p>加密/解密后对原始文件进行一次随机覆盖并删除。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-globe"></i></div>
+            <h3>跨平台支持</h3>
+            <p>支持 Windows / Linux / macOS，一次编译，随处运行。</p>
+        </div>
+    `;
+
+    const guiCards = `
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-key"></i></div>
+            <h3>强加密算法</h3>
+            <p>AES-256-CBC 结合 PBKDF2-HMAC-SHA256 密钥派生，安全可靠。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-hdd"></i></div>
+            <h3>大文件支持</h3>
+            <p>流式分块加/解密，内存占用低，轻松处理大文件。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-language"></i></div>
+            <h3>双语界面</h3>
+            <p>加密/解密对话框支持中文与英文切换，方便不同用户。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-window-maximize"></i></div>
+            <h3>现代 UI</h3>
+            <p>基于 Direct2D 绘制，圆角输入框与按钮，体验流畅。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
+            <h3>安全删除</h3>
+            <p>加密/解密后对原始文件进行一次随机覆盖并删除。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-box"></i></div>
+            <h3>完全便携</h3>
+            <p>单 EXE 文件，无需额外 DLL，开箱即用。</p>
+        </div>
+    `;
+
+    function switchVersion(version) {
+        // 更新标签状态
+        document.querySelectorAll('.version-tab').forEach(tab => {
+            tab.classList.toggle('active', tab.dataset.version === version);
+        });
+        // 切换描述
+        document.getElementById('desc-gui').style.display = version === 'gui' ? 'block' : 'none';
+        document.getElementById('desc-cli').style.display = version === 'cli' ? 'block' : 'none';
+        // 切换下载区域
+        document.getElementById('download-gui').classList.toggle('active', version === 'gui');
+        document.getElementById('download-cli').classList.toggle('active', version === 'cli');
+        // 切换特性卡片
+        document.getElementById('featuresGrid').innerHTML = version === 'gui' ? guiCards : cliCards;
+        // 切换截图区域
+        document.getElementById('screenshots').classList.toggle('hidden', version === 'cli');
+        // 更新版本信息
+        const detail = document.getElementById('version-detail');
+        if (version === 'gui') {
+            detail.textContent = '单文件 · 无需安装 · 支持 Windows 10/11';
+        } else {
+            detail.textContent = '跨平台支持 · 适合服务器和脚本 · 需自行编译或下载预编译版本';
+        }
+    }
+
+    // 弹窗
     function showQR(imageSrc, label) {
         document.getElementById('modalImage').src = imageSrc;
         document.getElementById('modalLabel').textContent = label;
