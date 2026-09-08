@@ -1,5 +1,6 @@
 # FileEncryptor
 
+> 🔐 轻量级文件加密工具 | Windows GUI + 跨平台 CLI | 基于 AES-256-CBC
 > 跨平台文件加密工具，提供图形界面 (Win32) 和命令行 (CLI) 两种版本。
 
 基于 AES-256-CBC 与 PBKDF2-HMAC-SHA256 的流式文件加解密工具。支持大文件分块处理，并提供简洁安全的操作方式。
@@ -89,6 +90,12 @@ for f in \*.enc; do ./enc -d -i "$f" -p mypass; done
 * **请妥善保管密码，丢失后将无法解密**
 
 ---
+
+## 🔏 代码签名
+
+本项目的 Release 版本使用 [SignPath Foundation](https://signpath.org/) 提供的免费代码签名服务，由 [SignPath.io](https://about.signpath.io/) 颁发证书。
+
+[![Signed by SignPath.io](https://about.signpath.io/images/badges/signed-by-signpath-badge.svg)](https://about.signpath.io/)
 
 ## 📄 许可证
 
