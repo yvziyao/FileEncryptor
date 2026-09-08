@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -281,7 +282,6 @@
             }
         }
 
-        /* ===== 弹窗遮罩层 ===== */
         .modal-overlay {
             display: none;
             position: fixed;
@@ -440,7 +440,7 @@
                 <p>基于 AES-256-CBC 与 PBKDF2 的流式文件加密工具。<br>为 Windows 提供简洁、高效的文件加解密体验。</p>
             </div>
             <div id="desc-cli" class="version-desc" style="display: none;">
-                <p>极简命令行文件加密工具，基于 AES-256-CBC 与 PBKDF2。<br>支持 Windows / Linux / macOS，适合服务器、远程环境或脚本集成。</p>
+                <p>极简命令行文件加密工具，支持 <code>-p</code> 参数直接传递密码。<br>支持 Windows / Linux / macOS，适合服务器、远程环境或脚本集成。</p>
             </div>
 
             <div id="download-gui" class="download-buttons active">
@@ -502,7 +502,6 @@
         </div>
     </section>
 
-    <!-- ===== 功能特性 ===== -->
     <section id="features" class="features">
         <div class="container">
             <h2>核心特性</h2>
@@ -542,7 +541,6 @@
         </div>
     </section>
 
-    <!-- ===== 应用预览（截图） ===== -->
     <section id="screenshots" class="screenshots">
         <div class="container">
             <h2>应用预览</h2>
@@ -563,7 +561,6 @@
         </div>
     </section>
 
-    <!-- 捐助区域 -->
     <div class="container">
         <div class="donate-box" style="margin: 0 auto 40px auto; max-width: 600px; padding: 20px 28px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);">
             <div style="display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;">
@@ -600,7 +597,6 @@
     </div>
 </footer>
 
-<!-- ===== 弹窗 ===== -->
 <div class="modal-overlay" id="qrModal" onclick="closeQR(event)">
     <div class="modal-content" onclick="event.stopPropagation();">
         <div class="modal-label" id="modalLabel">收款码</div>
@@ -609,9 +605,7 @@
     </div>
 </div>
 
-<!-- ===== JavaScript ===== -->
 <script>
-    // 两个版本对应的卡片 HTML
     const cliCards = `
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-key"></i></div>
@@ -626,12 +620,12 @@
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-terminal"></i></div>
             <h3>极简命令行</h3>
-            <p>轻量无依赖，适合远程服务器、自动化脚本和批量处理。</p>
+            <p>轻量无依赖，支持 <code>-p</code> 参数直接传递密码，适合批量处理。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-crosshairs"></i></div>
             <h3>隐藏密码输入</h3>
-            <p>输入密码时不回显字符，支持密码确认（加密模式），防止窥屏。</p>
+            <p>交互式输入密码时不回显字符，支持密码确认（加密模式），防止窥屏。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
@@ -679,30 +673,23 @@
     `;
 
     function switchVersion(version) {
-        // 更新标签状态
         document.querySelectorAll('.version-tab').forEach(tab => {
             tab.classList.toggle('active', tab.dataset.version === version);
         });
-        // 切换描述
         document.getElementById('desc-gui').style.display = version === 'gui' ? 'block' : 'none';
         document.getElementById('desc-cli').style.display = version === 'cli' ? 'block' : 'none';
-        // 切换下载区域
         document.getElementById('download-gui').classList.toggle('active', version === 'gui');
         document.getElementById('download-cli').classList.toggle('active', version === 'cli');
-        // 切换特性卡片
         document.getElementById('featuresGrid').innerHTML = version === 'gui' ? guiCards : cliCards;
-        // 切换截图区域
         document.getElementById('screenshots').classList.toggle('hidden', version === 'cli');
-        // 更新版本信息
         const detail = document.getElementById('version-detail');
         if (version === 'gui') {
             detail.textContent = '单文件 · 无需安装 · 支持 Windows 10/11';
         } else {
-            detail.textContent = '跨平台支持 · 适合服务器和脚本 · 需自行编译或下载预编译版本';
+            detail.textContent = '跨平台支持 · 支持 -p 参数 · 适合批量处理';
         }
     }
 
-    // 弹窗
     function showQR(imageSrc, label) {
         document.getElementById('modalImage').src = imageSrc;
         document.getElementById('modalLabel').textContent = label;

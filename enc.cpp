@@ -1,11 +1,10 @@
 // enc.cpp
-// 极简命令行文件加密工具 (静态链接版本)
-// 编译: g++ -std=c++17 enc.cpp -o enc.exe -static -lssl -lcrypto -lws2_32 -lgdi32 -lcrypt32
-// 用法: 
-//   加密: enc -e -i 输入文件
-//   解密: enc -d -i 输入文件.enc
+// 极简命令行文件加密工具 (支持 -p 参数)
+// 编译: 见下方说明
+
 #define NOMINMAX
 #define OPENSSL_API_COMPAT 0x10100000L
+
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/err.h>
@@ -23,7 +22,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <conio.h>  // for _getch()
+#include <conio.h>
 #else
 #include <termios.h>
 #include <unistd.h>
@@ -32,11 +31,49 @@
 namespace fs = std::filesystem;
 
 // ---------- 密码输入（隐藏回显） ----------
-std::string get_password(const std::string& prompt, bool confirm = false) {
+// 如果 password 参数非空，直接使用；否则交互式输入
+std::string get_password(const std::string& prompt, bool confirm, const std::string& preloaded = "") {
+    // 如果已经提供了密码，直接返回（用于 -p 参数）
+    if (!preloaded.empty()) {
+        if (confirm) {
+            // 加密模式下，即使提供了 -p，也要确认一次（避免手误）
+            std::cout << "使用命令行密码，请再次输入以确认: ";
+            std::string confirm_pwd;
+#ifdef _WIN32
+            char ch;
+            while ((ch = _getch()) != '\r') {
+                if (ch == '\b') {
+                    if (!confirm_pwd.empty()) {
+                        confirm_pwd.pop_back();
+                        std::cout << "\b \b";
+                    }
+                } else if (ch != 0 && ch != -32) {
+                    confirm_pwd.push_back(ch);
+                    std::cout << '*';
+                }
+            }
+            std::cout << std::endl;
+#else
+            struct termios oldt, newt;
+            tcgetattr(STDIN_FILENO, &oldt);
+            newt = oldt;
+            newt.c_lflag &= ~ECHO;
+            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+            std::getline(std::cin, confirm_pwd);
+            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+            std::cout << std::endl;
+#endif
+            if (preloaded != confirm_pwd) {
+                throw std::runtime_error("两次输入的密码不一致");
+            }
+        }
+        return preloaded;
+    }
+
+    // 否则交互式输入（原有逻辑）
     std::string password;
     
 #ifdef _WIN32
-    // Windows: 使用 _getch() 实现不回显输入
     std::cout << prompt;
     char ch;
     while ((ch = _getch()) != '\r') {
@@ -45,14 +82,13 @@ std::string get_password(const std::string& prompt, bool confirm = false) {
                 password.pop_back();
                 std::cout << "\b \b";
             }
-        } else if (ch != 0 && ch != -32) { // 过滤功能键
+        } else if (ch != 0 && ch != -32) {
             password.push_back(ch);
             std::cout << '*';
         }
     }
     std::cout << std::endl;
 #else
-    // Linux/macOS: 使用 termios
     struct termios oldt, newt;
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
@@ -198,7 +234,6 @@ void encrypt_file(const std::string& input_path, const std::string& output_path,
         throw std::runtime_error("AES初始化失败");
     }
     
-    // 获取文件大小用于进度显示
     uint64_t total_size = fs::file_size(input_path);
     uint64_t processed = 0;
     
@@ -256,7 +291,7 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
         throw std::runtime_error("AES初始化失败");
     }
     
-    uint64_t total_size = fs::file_size(input_path) - 32; // 减去salt和IV
+    uint64_t total_size = fs::file_size(input_path) - 32;
     uint64_t processed = 0;
     
     std::vector<uint8_t> inbuf(CHUNK), outbuf(CHUNK + 16);
@@ -291,20 +326,23 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
 
 // ---------- 主函数 ----------
 void print_usage(const char* prog_name) {
-    std::cout << "用法: " << prog_name << " -e|-d -i <输入文件>" << std::endl;
-    std::cout << "  -e    加密模式 (会提示输入密码并确认)" << std::endl;
-    std::cout << "  -d    解密模式 (会提示输入密码)" << std::endl;
+    std::cout << "用法: " << prog_name << " -e|-d -i <输入文件> [-p <密码>]" << std::endl;
+    std::cout << "  -e    加密模式" << std::endl;
+    std::cout << "  -d    解密模式" << std::endl;
     std::cout << "  -i    输入文件路径" << std::endl;
+    std::cout << "  -p    密码（可选）。如不提供，会交互式输入" << std::endl;
     std::cout << "示例:" << std::endl;
-    std::cout << "  加密: " << prog_name << " -e -i secret.txt" << std::endl;
-    std::cout << "  解密: " << prog_name << " -d -i secret.txt.enc" << std::endl;
+    std::cout << "  交互式加密: " << prog_name << " -e -i secret.txt" << std::endl;
+    std::cout << "  命令行加密: " << prog_name << " -e -i secret.txt -p mypass" << std::endl;
+    std::cout << "  批量解密:   for %f in (*.enc) do " << prog_name << " -d -i \"%f\" -p mypass" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
     OpenSSL_add_all_algorithms();
     ERR_load_crypto_strings();
     
-    std::string mode, input_file;
+    std::string mode, input_file, password;
+    bool pwd_provided = false;
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -312,6 +350,9 @@ int main(int argc, char* argv[]) {
             mode = arg;
         } else if (arg == "-i" && i + 1 < argc) {
             input_file = argv[++i];
+        } else if (arg == "-p" && i + 1 < argc) {
+            password = argv[++i];
+            pwd_provided = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -325,21 +366,21 @@ int main(int argc, char* argv[]) {
     
     try {
         if (mode == "-e") {
-            // 加密：需要确认密码
             std::cout << "加密文件: " << input_file << std::endl;
-            std::string password = get_password("输入密码: ", true);
+            // 如果提供了 -p，直接使用；否则交互式输入（加密需要确认）
+            std::string final_pwd = get_password("输入密码: ", true, pwd_provided ? password : "");
             std::string output = input_file + ".enc";
-            encrypt_file(input_file, output, password);
+            encrypt_file(input_file, output, final_pwd);
         } else if (mode == "-d") {
-            // 解密：只需输入一次密码
             if (input_file.size() < 4 || input_file.substr(input_file.size() - 4) != ".enc") {
                 std::cerr << "错误：解密文件应以 .enc 结尾" << std::endl;
                 return 1;
             }
             std::cout << "解密文件: " << input_file << std::endl;
-            std::string password = get_password("输入密码: ", false);
+            // 解密时，如果提供了 -p，直接使用；否则交互式输入（不需要确认）
+            std::string final_pwd = get_password("输入密码: ", false, pwd_provided ? password : "");
             std::string output = input_file.substr(0, input_file.size() - 4);
-            decrypt_file(input_file, output, password);
+            decrypt_file(input_file, output, final_pwd);
         } else {
             std::cerr << "未知模式: " << mode << std::endl;
             return 1;
