@@ -98,5 +98,3 @@ for f in \*.enc; do ./enc -d -i "$f" -p mypass; done
 
 欢迎提交 Issue 与 Pull Request。
 
-```
-
