@@ -11,7 +11,7 @@
 * **安全删除**：加密/解密后对原始文件进行一次随机覆盖并删除（尽力减少残留）
 * **跨平台**：命令行版本支持 Windows / Linux / macOS
 
-\---
+---
 
 ## 🖥️ 图形界面版本 (GUI)
 
@@ -29,7 +29,7 @@
 2. 双击运行，点击「加密」或「解密」按钮
 3. 选择目标文件，输入密码即可
 
-\---
+---
 
 ## ⌨️ 命令行版本 (CLI)
 
@@ -48,10 +48,10 @@
 g++ -std=c++17 enc.cpp -o enc -static -lssl -lcrypto -lws2\_32 -lgdi32 -lcrypt32
 ```
 
-> \*\*依赖\*\*：编译需要 OpenSSL 开发库。  
-> - \*\*Ubuntu/Debian\*\*：`sudo apt install libssl-dev`  
-> - \*\*Windows (MSYS2)\*\*：`pacman -S mingw-w64-x86\_64-openssl`  
-> - \*\*macOS\*\*：`brew install openssl`（可能需要指定 include 和 lib 路径）
+> **依赖**：编译需要 OpenSSL 开发库。  
+> - **Ubuntu/Debian**：`sudo apt install libssl-dev`  
+> - **Windows (MSYS2)**：`pacman -S mingw-w64-x86\_64-openssl`  
+> - **macOS**：`brew install openssl`（可能需要指定 include 和 lib 路径）
 
 ### 使用方法
 
@@ -88,7 +88,7 @@ for f in \*.enc; do ./enc -d -i "$f" -p mypass; done
 * 建议在本地、非同步目录中使用，并自行评估安全风险
 * **请妥善保管密码，丢失后将无法解密**
 
-\---
+---
 
 ## 📄 许可证
 
