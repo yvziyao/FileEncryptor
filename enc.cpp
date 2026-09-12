@@ -33,40 +33,8 @@ namespace fs = std::filesystem;
 // ---------- 密码输入（隐藏回显） ----------
 // 如果 password 参数非空，直接使用；否则交互式输入
 std::string get_password(const std::string& prompt, bool confirm, const std::string& preloaded = "") {
-    // 如果已经提供了密码，直接返回（用于 -p 参数）
+    // 如果已经通过 -p 提供了密码，直接返回，不再确认
     if (!preloaded.empty()) {
-        if (confirm) {
-            // 加密模式下，即使提供了 -p，也要确认一次（避免手误）
-            std::cout << "使用命令行密码，请再次输入以确认: ";
-            std::string confirm_pwd;
-#ifdef _WIN32
-            char ch;
-            while ((ch = _getch()) != '\r') {
-                if (ch == '\b') {
-                    if (!confirm_pwd.empty()) {
-                        confirm_pwd.pop_back();
-                        std::cout << "\b \b";
-                    }
-                } else if (ch != 0 && ch != -32) {
-                    confirm_pwd.push_back(ch);
-                    std::cout << '*';
-                }
-            }
-            std::cout << std::endl;
-#else
-            struct termios oldt, newt;
-            tcgetattr(STDIN_FILENO, &oldt);
-            newt = oldt;
-            newt.c_lflag &= ~ECHO;
-            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-            std::getline(std::cin, confirm_pwd);
-            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-            std::cout << std::endl;
-#endif
-            if (preloaded != confirm_pwd) {
-                throw std::runtime_error("两次输入的密码不一致");
-            }
-        }
         return preloaded;
     }
 
@@ -135,7 +103,6 @@ std::string get_password(const std::string& prompt, bool confirm, const std::str
     
     return password;
 }
-
 // ---------- 工具函数 ----------
 std::vector<uint8_t> derive_key(const std::string& password, const std::vector<uint8_t>& salt) {
     std::vector<uint8_t> key(32);
