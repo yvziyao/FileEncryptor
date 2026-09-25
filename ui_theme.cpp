@@ -29,6 +29,8 @@
 #define UI_DWMWA_TEXT_COLOR               36
 #define UI_DWMWCP_DONOTROUND              1
 #define UI_DWMWCP_ROUND                   2
+// 传给 DWMWA_CAPTION_COLOR / TEXT_COLOR / BORDER_COLOR 表示“恢复系统默认”
+#define UI_DWMWA_COLOR_DEFAULT            0xFFFFFFFF
 
 namespace {
 
@@ -346,12 +348,19 @@ void UiApplyFrame(HWND hwnd, bool roundCorners, bool darkTitleBar) {
     DWORD pref = roundCorners ? UI_DWMWCP_ROUND : UI_DWMWCP_DONOTROUND;
     g_dwmSet(hwnd, UI_DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
 
-    if (darkTitleBar) {
-        COLORREF cap = UiColors().bg;
-        COLORREF txt = UiColors().text;
-        g_dwmSet(hwnd, UI_DWMWA_CAPTION_COLOR, &cap, sizeof(cap));
-        g_dwmSet(hwnd, UI_DWMWA_TEXT_COLOR, &txt, sizeof(txt));
-    }
+    // 深色时显式指定标题栏配色；浅色时必须显式还原为系统默认值，
+    // 否则之前设过的深色会被 DWM 一直保留（表现为“深色切浅色后最顶部还是黑的”）。
+    // DWMWA_COLOR_DEFAULT = 0xFFFFFFFF，表示恢复系统默认。
+    const COLORREF cap = darkTitleBar ? UiColors().bg   : (COLORREF)UI_DWMWA_COLOR_DEFAULT;
+    const COLORREF txt = darkTitleBar ? UiColors().text : (COLORREF)UI_DWMWA_COLOR_DEFAULT;
+    g_dwmSet(hwnd, UI_DWMWA_CAPTION_COLOR, &cap, sizeof(cap));
+    g_dwmSet(hwnd, UI_DWMWA_TEXT_COLOR, &txt, sizeof(txt));
+    // 边框色同理，避免深色下的边框色残留
+    const COLORREF border = darkTitleBar ? UiColors().border : (COLORREF)UI_DWMWA_COLOR_DEFAULT;
+    g_dwmSet(hwnd, UI_DWMWA_BORDER_COLOR, &border, sizeof(border));
+
+    // 让非客户区立即重画，否则标题栏/边框的新配色可能要等下一次窗口变化才生效
+    RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_UPDATENOW);
 }
 
 void UiDetheme(HWND child) {
