@@ -19,3 +19,21 @@ obj/
 *.vcxproj.user
 x64/Release/
 Release/
+# 整个 x64 构建目录都忽略（Debug + Release）
+x64/
+Debug/
+
+# Visual Studio 构建中间产物
+*.tlog
+*.ilk
+*.recipe
+*.lastbuildstate
+*.resfiles
+*.resfiles.intermediate
+*.FileListAbsolute.txt
+*.rsp
+*.up2date
+*.Up2Date
+
+# WinRT 自动生成的头文件
+Generated Files/

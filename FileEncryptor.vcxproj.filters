@@ -27,6 +27,15 @@
     <ClCompile Include="FileEncryptor_helpers.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="app_settings.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ui_theme.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="winui_dialog.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -45,6 +54,15 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="FileEncryptor_helpers.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="app_settings.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ui_theme.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="winui_dialog.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

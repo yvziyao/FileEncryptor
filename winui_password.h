@@ -4,4 +4,6 @@
 #include <windows.h>
 #include <string>
 
-bool ShowPasswordDialogWinUI(HWND parent, std::string& password, bool confirm);
+// subtitle 非空时显示在标题下方（批量处理时用于指明当前文件）
+bool ShowPasswordDialogWinUI(HWND parent, std::string& password, bool confirm,
+                             const std::wstring& subtitle = std::wstring());

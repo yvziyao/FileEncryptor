@@ -169,17 +169,23 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="app_settings.cpp" />
     <ClCompile Include="FileEncryptor.cpp" />
     <ClCompile Include="FileEncryptor_helpers.cpp" />
+    <ClCompile Include="ui_theme.cpp" />
     <ClCompile Include="winrt_init.cpp" />
+    <ClCompile Include="winui_dialog.cpp" />
     <ClCompile Include="winui_password.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="app_settings.h" />
     <ClInclude Include="FileEncryptor_helpers.h" />
     <ClInclude Include="packages\Microsoft.WindowsAppSDK.ML.2.1.74\include\WindowsAppSDK-VersionInfo.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="ui_theme.h" />
     <ClInclude Include="WindowsAppSDK-VersionInfo.h" />
     <ClInclude Include="winrt_init.h" />
+    <ClInclude Include="winui_dialog.h" />
     <ClInclude Include="winui_password.h" />
   </ItemGroup>
   <ItemGroup>

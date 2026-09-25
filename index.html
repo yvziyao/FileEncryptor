@@ -437,10 +437,10 @@
             </div>
 
             <div id="desc-gui" class="version-desc">
-                <p>基于 AES-256-CBC 与 PBKDF2 的流式文件加密工具。<br>为 Windows 提供简洁、高效的文件加解密体验。</p>
+                <p>基于 AES-256-GCM 与 PBKDF2 的流式文件加密工具。<br>可选加密强度、可配置输出位置与删除策略，为 Windows 提供简洁、安全、高效的文件加解密体验。</p>
             </div>
             <div id="desc-cli" class="version-desc" style="display: none;">
-                <p>极简命令行文件加密工具，支持 <code>-p</code> 参数直接传递密码。<br>支持 Windows / Linux / macOS，适合服务器、远程环境或脚本集成。</p>
+                <p>极简命令行文件加密工具，支持 <code>-p</code> 直接传递密码、<code>-s</code> 指定加密强度。<br>支持 Windows / Linux / macOS，与图形界面版本格式互通，适合服务器、远程环境或脚本集成。</p>
             </div>
 
             <div id="download-gui" class="download-buttons active">
@@ -492,12 +492,12 @@
             </div>
 
             <div class="version-info">
-                <i class="fas fa-info-circle"></i> <span id="version-detail">单文件 · 无需安装 · 支持 Windows 10/11</span>
+                <i class="fas fa-info-circle"></i> <span id="version-detail">单文件 · 无需安装 · WinUI 3 风格界面 · 深色模式</span>
             </div>
 
             <div class="security-note">
                 <h4><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i> 安全提示</h4>
-                <p>加密/解密完成后，程序会对原始文件进行随机数据覆盖并删除，尽力减少残留。建议在本地、非同步目录中使用。</p>
+                <p>采用 AES-256-GCM 认证加密，密文自带认证标签。加密后可按设置覆写删除源文件；解密后的加密文件不含明文残留，直接删除即可，也可选择保留。</p>
             </div>
         </div>
     </section>
@@ -510,7 +510,7 @@
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-key"></i></div>
                     <h3>强加密算法</h3>
-                    <p>AES-256-CBC 结合 PBKDF2-HMAC-SHA256 密钥派生，安全可靠。</p>
+                    <p>AES-256-GCM 认证加密，配合 PBKDF2-HMAC-SHA256 密钥派生，密码错误或文件被篡改都能可靠检出。</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-hdd"></i></div>
@@ -518,19 +518,19 @@
                     <p>流式分块加/解密，内存占用低，轻松处理大文件。</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon"><i class="fas fa-language"></i></div>
-                    <h3>双语界面</h3>
-                    <p>加密/解密对话框支持中文与英文切换，方便不同用户。</p>
+                    <div class="feature-icon"><i class="fas fa-sliders-h"></i></div>
+                    <h3>设置面板</h3>
+                    <p>语言、主题、输出位置、删除策略、完成后行为与加密强度，全部可视化配置。</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-window-maximize"></i></div>
                     <h3>现代 UI</h3>
-                    <p>基于 Direct2D 绘制，圆角输入框与按钮，体验流畅。</p>
+                    <p>WinUI 3 风格自绘界面，圆角控件、悬停与进度动画，支持浅色 / 深色 / 跟随系统主题。</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
                     <h3>安全删除</h3>
-                    <p>加密/解密后对原始文件进行一次随机覆盖并删除。</p>
+                    <p>加密后按设置覆写删除源文件（1 次 / 3 次 / 保留），解密后直接删除加密文件。</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-box"></i></div>
@@ -544,21 +544,24 @@
     <section id="screenshots" class="screenshots">
         <div class="container">
             <h2>应用预览</h2>
-            <div class="screenshot-grid">
-                <div class="screenshot-item">
-                    <img src="encrypt.png" alt="加密界面截图">
-                    <p><i class="fas fa-lock" style="color:#2563eb;"></i> 加密文件界面</p>
-                </div>
-                <div class="screenshot-item">
-                    <img src="decrypt.png" alt="解密界面截图">
-                    <p><i class="fas fa-unlock" style="color:#2563eb;"></i> 解密文件界面</p>
-                </div>
-                <div class="screenshot-item">
-                    <img src="main.png" alt="主界面截图">
-                    <p><i class="fas fa-window-restore" style="color:#2563eb;"></i> 主程序界面</p>
-                </div>
-            </div>
-        </div>
+<div class="screenshot-grid">
+    <div class="screenshot-item">
+        <img src="encrypt.png" alt="加密界面截图">
+        <p><i class="fas fa-lock" style="color:#2563eb;"></i> 加密文件界面</p>
+    </div>
+    <div class="screenshot-item">
+        <img src="decrypt.png" alt="解密界面截图">
+        <p><i class="fas fa-unlock" style="color:#2563eb;"></i> 解密文件界面</p>
+    </div>
+    <div class="screenshot-item">
+        <img src="main.png" alt="主界面截图">
+        <p><i class="fas fa-window-restore" style="color:#2563eb;"></i> 主程序界面</p>
+    </div>
+    <div class="screenshot-item">
+        <img src="settings.png" alt="设置界面截图">
+        <p><i class="fas fa-sliders-h" style="color:#2563eb;"></i> 设置界面</p>
+    </div>
+</div>
     </section>
 
     <div class="container">
@@ -610,7 +613,7 @@
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-key"></i></div>
             <h3>强加密算法</h3>
-            <p>AES-256-CBC 结合 PBKDF2-HMAC-SHA256 密钥派生，安全可靠。</p>
+            <p>AES-256-GCM 认证加密，配合 PBKDF2-HMAC-SHA256 密钥派生，密码错误或文件被篡改都能可靠检出。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-hdd"></i></div>
@@ -630,7 +633,7 @@
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
             <h3>安全删除</h3>
-            <p>加密/解密后对原始文件进行一次随机覆盖并删除。</p>
+            <p>加密后按设置覆写删除源文件（1 次 / 3 次 / 保留），解密后直接删除加密文件。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-globe"></i></div>
@@ -643,7 +646,7 @@
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-key"></i></div>
             <h3>强加密算法</h3>
-            <p>AES-256-CBC 结合 PBKDF2-HMAC-SHA256 密钥派生，安全可靠。</p>
+            <p>AES-256-GCM 认证加密，配合 PBKDF2-HMAC-SHA256 密钥派生，密码错误或文件被篡改都能可靠检出。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-hdd"></i></div>
@@ -651,19 +654,19 @@
             <p>流式分块加/解密，内存占用低，轻松处理大文件。</p>
         </div>
         <div class="feature-card">
-            <div class="feature-icon"><i class="fas fa-language"></i></div>
-            <h3>双语界面</h3>
-            <p>加密/解密对话框支持中文与英文切换，方便不同用户。</p>
+            <div class="feature-icon"><i class="fas fa-sliders-h"></i></div>
+            <h3>设置面板</h3>
+            <p>语言、主题、输出位置、删除策略、完成后行为与加密强度，全部可视化配置。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-window-maximize"></i></div>
             <h3>现代 UI</h3>
-            <p>基于 Direct2D 绘制，圆角输入框与按钮，体验流畅。</p>
+            <p>WinUI 3 风格自绘界面，圆角控件、悬停与进度动画，支持浅色 / 深色 / 跟随系统主题。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
             <h3>安全删除</h3>
-            <p>加密/解密后对原始文件进行一次随机覆盖并删除。</p>
+            <p>加密后按设置覆写删除源文件（1 次 / 3 次 / 保留），解密后直接删除加密文件。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-box"></i></div>
@@ -684,9 +687,9 @@
         document.getElementById('screenshots').classList.toggle('hidden', version === 'cli');
         const detail = document.getElementById('version-detail');
         if (version === 'gui') {
-            detail.textContent = '单文件 · 无需安装 · 支持 Windows 10/11';
+            detail.textContent = '单文件 · 无需安装 · WinUI 3 风格界面 · 深色模式';
         } else {
-            detail.textContent = '跨平台支持 · 支持 -p 参数 · 适合批量处理';
+            detail.textContent = '跨平台支持 · 与 GUI 格式互通 · 适合批量处理';
         }
     }
 
