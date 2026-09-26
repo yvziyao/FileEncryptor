@@ -440,7 +440,7 @@
                 <p>基于 AES-256-GCM 与 PBKDF2 的流式文件加密工具。<br>可选加密强度、可配置输出位置与删除策略，为 Windows 提供简洁、安全、高效的文件加解密体验。</p>
             </div>
             <div id="desc-cli" class="version-desc" style="display: none;">
-                <p>极简命令行文件加密工具，支持 <code>-p</code> 直接传递密码、<code>-s</code> 指定加密强度。<br>支持 Windows / Linux / macOS，与图形界面版本格式互通，适合服务器、远程环境或脚本集成。</p>
+                <p>极简命令行文件加密工具，支持 <code>-p</code> 传递密码、<code>-s</code> 指定加密强度、<code>-o</code> 指定输出目录、<code>-k</code> 保留源文件。<br>支持 Windows / Linux / macOS，与图形界面版本格式互通，适合服务器、远程环境或脚本集成。</p>
             </div>
 
             <div id="download-gui" class="download-buttons active">
@@ -623,7 +623,7 @@
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-terminal"></i></div>
             <h3>极简命令行</h3>
-            <p>轻量无依赖，支持 <code>-p</code> 参数直接传递密码，适合批量处理。</p>
+            <p>轻量无依赖，支持 <code>-p</code> 密码、<code>-s</code> 强度、<code>-o</code> 输出目录、<code>-k</code> 保留源文件，适合批量处理。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-crosshairs"></i></div>
@@ -633,7 +633,7 @@
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
             <h3>安全删除</h3>
-            <p>加密后按设置覆写删除源文件（1 次 / 3 次 / 保留），解密后直接删除加密文件。</p>
+            <p>加密后可用 <code>-w</code> 覆写删除源文件，或用 <code>-k</code> 保留；解密后直接删除加密文件。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-globe"></i></div>

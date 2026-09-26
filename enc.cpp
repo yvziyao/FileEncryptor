@@ -1,6 +1,13 @@
 // enc.cpp
-// 极简命令行文件加密工具 (支持 -p 参数)
-// 编译: 见下方说明
+// 极简命令行文件加密工具（加密/解密、指定输出目录、可控安全删除）
+//
+// 源码为 UTF-8（带 BOM），保证在任何 ANSI 代码页的机器上都能正确编译。
+// MSVC 的“执行字符集”默认跟随系统 ANSI 代码页，这里强制成 UTF-8，
+// 使字面量在可执行文件中固定为 UTF-8，与本程序统一使用 UTF-8 的内部编码一致。
+
+#ifdef _MSC_VER
+#pragma execution_character_set("utf-8")
+#endif
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -31,6 +38,61 @@
 #endif
 
 namespace fs = std::filesystem;
+
+// ---------- 跨平台路径与编码 ----------
+// 内部一律用 UTF-8 的 std::string 表示路径。
+// Windows 上必须显式做 UTF-8 -> UTF-16 转换再交给文件 API：否则标准库会按系统
+// ANSI 代码页解释窄字符串，中文路径在非中文区域设置下会直接打不开。
+// 非 Windows 平台本身就是 UTF-8，直接构造即可。
+#ifdef _WIN32
+static std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
+    return w;
+}
+
+// main() 拿到的 argv 是按系统 ANSI 代码页编码的，统一转成 UTF-8 再使用。
+// 当系统代码页本身就是 65001 时，这个转换是恒等的。
+static std::string ArgToUtf8(const char* s) {
+    if (!s || !*s) return std::string();
+    int wn = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    if (wn <= 0) return std::string(s);
+    std::wstring w((size_t)wn, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s, -1, &w[0], wn);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    int un = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    if (un <= 0) return std::string(s);
+    std::string out((size_t)un, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], un, nullptr, nullptr);
+    return out;
+}
+
+// 把控制台输出代码页切到 UTF-8（源码字面量是 UTF-8），退出时还原，
+// 免得在默认中文 Windows（代码页 936）下中文显示成乱码。
+struct ConsoleUtf8Scope {
+    UINT old_cp = 0;
+    ConsoleUtf8Scope() {
+        old_cp = GetConsoleOutputCP();
+        if (old_cp != 0 && old_cp != CP_UTF8) SetConsoleOutputCP(CP_UTF8);
+    }
+    ~ConsoleUtf8Scope() {
+        if (old_cp != 0 && old_cp != CP_UTF8) SetConsoleOutputCP(old_cp);
+    }
+};
+#else
+static std::string ArgToUtf8(const char* s) { return std::string(s ? s : ""); }
+#endif
+
+static fs::path PathOf(const std::string& utf8_path) {
+#ifdef _WIN32
+    return fs::path(Utf8ToWide(utf8_path));
+#else
+    return fs::path(utf8_path);
+#endif
+}
 
 // ---------- 密码输入（隐藏回显） ----------
 // 如果 password 参数非空，直接使用；否则交互式输入
@@ -157,9 +219,16 @@ std::vector<uint8_t> derive_key(const std::string& password, const std::vector<u
     return key;
 }
 
-void secure_delete(const std::string& path) {
+// 删除文件。passes = 0 时直接删除（密文无明文残留，无需覆写）；
+// passes >= 1 时先用随机数据覆写 N 遍再删除（明文源文件用）。
+void secure_delete(const std::string& path, int passes) {
+    if (passes <= 0) {
+        std::error_code ec;
+        fs::remove(PathOf(path), ec);
+        return;
+    }
     try {
-        fs::path file_path(path);
+        fs::path file_path = PathOf(path);
         if (!fs::exists(file_path)) return;
         
         size_t file_size = fs::file_size(file_path);
@@ -168,7 +237,7 @@ void secure_delete(const std::string& path) {
             return;
         }
 
-        std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+        std::fstream file(PathOf(path), std::ios::in | std::ios::out | std::ios::binary);
         if (!file) {
             fs::remove(file_path);
             return;
@@ -177,7 +246,7 @@ void secure_delete(const std::string& path) {
         const size_t CHUNK = 4096;
         std::vector<uint8_t> buf(CHUNK);
         
-        for (int pass = 0; pass < 3; ++pass) {
+        for (int pass = 0; pass < passes; ++pass) {
             file.seekp(0, std::ios::beg);
             size_t remaining = file_size;
             while (remaining > 0) {
@@ -185,7 +254,7 @@ void secure_delete(const std::string& path) {
                 if (RAND_bytes(buf.data(), (int)to_write) != 1) {
                     std::fill(buf.begin(), buf.begin() + to_write, (uint8_t)(pass + 1));
                 }
-                if (pass == 1) {
+                if (pass % 2 == 1) {
                     for (size_t i = 0; i < to_write; ++i) buf[i] = ~buf[i];
                 }
                 file.write((char*)buf.data(), to_write);
@@ -196,7 +265,8 @@ void secure_delete(const std::string& path) {
         file.close();
         fs::remove(file_path);
     } catch (...) {
-        fs::remove(path);
+        std::error_code ec;
+        fs::remove(path, ec);
     }
 }
 
@@ -228,10 +298,10 @@ void encrypt_file(const std::string& input_path, const std::string& output_path,
 
     auto key = derive_key(password, salt, iterations);
 
-    std::ifstream in_file(input_path, std::ios::binary);
+    std::ifstream in_file(PathOf(input_path), std::ios::binary);
     if (!in_file) throw std::runtime_error("无法打开输入文件");
 
-    std::ofstream out_file(output_path, std::ios::binary);
+    std::ofstream out_file(PathOf(output_path), std::ios::binary);
     if (!out_file) throw std::runtime_error("无法创建输出文件");
 
     // 文件头
@@ -254,7 +324,7 @@ void encrypt_file(const std::string& input_path, const std::string& output_path,
         throw std::runtime_error("AES初始化失败");
     }
 
-    uint64_t total_size = fs::file_size(input_path);
+    uint64_t total_size = fs::file_size(PathOf(input_path));
     uint64_t processed = 0;
 
     std::vector<uint8_t> inbuf(CHUNK), outbuf(CHUNK + 32);
@@ -284,25 +354,23 @@ void encrypt_file(const std::string& input_path, const std::string& output_path,
     }
     out_file.write((char*)tag, kTagLen);
 
-    show_progress(total_size, total_size);
+    // 循环里最后一次 show_progress 已经到 100%，这里不再重复打印进度条
     std::cout << std::endl;
 
     EVP_CIPHER_CTX_free(ctx);
     in_file.close();
     out_file.close();
-
-    secure_delete(input_path);
-    std::cout << "加密成功，源文件已删除。输出文件: " << output_path << std::endl;
+    // 源文件的删除策略由 main() 决定（-k 保留 / -w 控制覆写次数）
 }
 
 // ---------- 解密核心（自动识别新旧格式）----------
 void decrypt_file(const std::string& input_path, const std::string& output_path, const std::string& password) {
     const size_t CHUNK = 4 * 1024 * 1024;
 
-    std::ifstream in_file(input_path, std::ios::binary);
+    std::ifstream in_file(PathOf(input_path), std::ios::binary);
     if (!in_file) throw std::runtime_error("无法打开加密文件");
 
-    uint64_t file_size = fs::file_size(input_path);
+    uint64_t file_size = fs::file_size(PathOf(input_path));
 
     // 嗅探文件头：新版以魔数开头，旧版直接是随机 salt
     uint8_t head[8] = {};
@@ -347,7 +415,7 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
 
     auto key = derive_key(password, salt, iterations);
 
-    std::ofstream out_file(output_path, std::ios::binary);
+    std::ofstream out_file(PathOf(output_path), std::ios::binary);
     if (!out_file) throw std::runtime_error("无法创建输出文件");
 
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
@@ -372,7 +440,7 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
         EVP_CIPHER_CTX_free(ctx);
         out_file.close();
         std::error_code ec;
-        fs::remove(output_path, ec);
+        fs::remove(PathOf(output_path), ec);
         throw std::runtime_error(msg);
     };
 
@@ -409,54 +477,80 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
     }
     if (outlen > 0) out_file.write((char*)outbuf.data(), outlen);
 
-    show_progress(cipher_len, cipher_len);
+    // 循环里最后一次 show_progress 已经到 100%，这里不再重复打印进度条
     std::cout << std::endl;
 
     EVP_CIPHER_CTX_free(ctx);
     in_file.close();
     out_file.close();
-
-    // 加密文件是密文，无明文残留，直接删除即可（与 GUI 版一致）
-    std::error_code ec;
-    fs::remove(input_path, ec);
-    std::cout << "解密成功，加密文件已删除。输出文件: " << output_path << std::endl;
+    // 加密文件的删除策略由 main() 决定（-k 保留）
 }
 
 // ---------- 主函数 ----------
 void print_usage(const char* prog_name) {
-    std::cout << "用法: " << prog_name << " -e|-d -i <输入文件> [-p <密码>] [-s <强度>]" << std::endl;
-    std::cout << "  -e    加密模式" << std::endl;
-    std::cout << "  -d    解密模式" << std::endl;
-    std::cout << "  -i    输入文件路径" << std::endl;
-    std::cout << "  -p    密码（可选）。如不提供，会交互式输入" << std::endl;
-    std::cout << "  -s    加密强度：fast|standard|secure|extreme（默认 standard）" << std::endl;
-    std::cout << "        对应 PBKDF2 迭代次数 5万 / 10万 / 30万 / 60万" << std::endl;
+    std::cout << "用法: " << prog_name << " -e|-d -i <输入文件> [选项]" << std::endl;
+    std::cout << "  -e            加密模式" << std::endl;
+    std::cout << "  -d            解密模式" << std::endl;
+    std::cout << "  -i <文件>     输入文件路径" << std::endl;
+    std::cout << "  -o <目录>     输出目录（默认与输入文件同目录）" << std::endl;
+    std::cout << "  -p <密码>     密码（可选）。如不提供，会交互式输入" << std::endl;
+    std::cout << "  -s <强度>     加密强度：fast|standard|secure|extreme（默认 standard）" << std::endl;
+    std::cout << "                对应 PBKDF2 迭代次数 5万 / 10万 / 30万 / 60万" << std::endl;
+    std::cout << "  -w <次数>     删除前覆写次数：0=直接删除，1/3=覆写次数（默认 3）" << std::endl;
+    std::cout << "  -k, --keep    保留源文件（加密时）/ 加密文件（解密时），不做删除" << std::endl;
+    std::cout << "                说明：解密后的加密文件不含明文残留，始终直接删除，不覆写" << std::endl;
     std::cout << "示例:" << std::endl;
     std::cout << "  交互式加密: " << prog_name << " -e -i secret.txt" << std::endl;
     std::cout << "  命令行加密: " << prog_name << " -e -i secret.txt -p mypass" << std::endl;
     std::cout << "  高强度加密: " << prog_name << " -e -i secret.txt -p mypass -s extreme" << std::endl;
-    std::cout << "  批量解密:   for %f in (*.enc) do " << prog_name << " -d -i \"%f\" -p mypass" << std::endl;
+    std::cout << "  输出到指定目录: " << prog_name << " -e -i secret.txt -p mypass -o D:\\Encrypted" << std::endl;
+    std::cout << "  保留源文件: " << prog_name << " -e -i secret.txt -p mypass -k" << std::endl;
+    std::cout << "  批量解密:   for %f in (*.enc) do " << prog_name
+              << " -d -i \"%f\" -p mypass -o D:\\Decrypted" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    // 源码字面量是 UTF-8：把控制台输出代码页临时切到 UTF-8，退出时还原
+    ConsoleUtf8Scope console_utf8;
+    (void)console_utf8;
+#endif
     OpenSSL_add_all_algorithms();
     ERR_load_crypto_strings();
     
-    std::string mode, input_file, password;
+    std::string mode, input_file, password, out_dir;
     bool pwd_provided = false;
+    bool keep_source = false;
     int strength = STRENGTH_STANDARD;
+    int overwrite_passes = 3;
     
     for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
+        std::string arg = ArgToUtf8(argv[i]);
         if (arg == "-e" || arg == "-d") {
             mode = arg;
         } else if (arg == "-i" && i + 1 < argc) {
-            input_file = argv[++i];
+            input_file = ArgToUtf8(argv[++i]);
+        } else if (arg == "-o" && i + 1 < argc) {
+            out_dir = ArgToUtf8(argv[++i]);
         } else if (arg == "-p" && i + 1 < argc) {
-            password = argv[++i];
+            password = ArgToUtf8(argv[++i]);
             pwd_provided = true;
+        } else if (arg == "-k" || arg == "--keep") {
+            keep_source = true;
+        } else if (arg == "-w" && i + 1 < argc) {
+            std::string s = ArgToUtf8(argv[++i]);
+            try {
+                overwrite_passes = std::stoi(s);
+            } catch (...) {
+                std::cerr << "错误：-w 需要一个整数（0=直接删除，1/3=覆写次数）" << std::endl;
+                return 1;
+            }
+            if (overwrite_passes < 0 || overwrite_passes > 10) {
+                std::cerr << "错误：-w 取值范围为 0-10（推荐 0 / 1 / 3）" << std::endl;
+                return 1;
+            }
         } else if (arg == "-s" && i + 1 < argc) {
-            std::string s = argv[++i];
+            std::string s = ArgToUtf8(argv[++i]);
             if (s == "fast")          strength = STRENGTH_FAST;
             else if (s == "standard") strength = STRENGTH_STANDARD;
             else if (s == "secure")   strength = STRENGTH_SECURE;
@@ -468,6 +562,10 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
+        } else {
+            std::cerr << "错误：无法识别的参数 '" << arg << "'" << std::endl;
+            print_usage(argv[0]);
+            return 1;
         }
     }
     
@@ -476,26 +574,60 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    // 输出目录校验（-o）
+    if (!out_dir.empty()) {
+        std::error_code ec;
+        if (!fs::exists(PathOf(out_dir), ec) || !fs::is_directory(PathOf(out_dir), ec)) {
+            std::cerr << "错误：输出目录不存在或不是目录: " << out_dir << std::endl;
+            return 1;
+        }
+    }
+    
     try {
-        if (mode == "-e") {
+        const bool encrypting = (mode == "-e");
+        
+        if (!encrypting && (input_file.size() < 4 || input_file.substr(input_file.size() - 4) != ".enc")) {
+            std::cerr << "错误：解密文件应以 .enc 结尾" << std::endl;
+            return 1;
+        }
+        
+        // 输出文件名：加密加 .enc，解密去掉 .enc；目录由 -o 决定，默认与输入同目录
+        const fs::path in_path = PathOf(input_file);
+        std::string name = in_path.filename().string();
+        if (encrypting) {
+            name += ".enc";
+        } else {
+            name = name.substr(0, name.size() - 4);
+        }
+        const fs::path out_path = out_dir.empty()
+            ? (in_path.parent_path() / name)
+            : (PathOf(out_dir) / name);
+        const std::string output = out_path.string();
+        
+        if (encrypting) {
             std::cout << "加密文件: " << input_file << std::endl;
             // 如果提供了 -p，直接使用；否则交互式输入（加密需要确认）
             std::string final_pwd = get_password("输入密码: ", true, pwd_provided ? password : "");
-            std::string output = input_file + ".enc";
             encrypt_file(input_file, output, final_pwd, strength_iterations(strength));
-        } else if (mode == "-d") {
-            if (input_file.size() < 4 || input_file.substr(input_file.size() - 4) != ".enc") {
-                std::cerr << "错误：解密文件应以 .enc 结尾" << std::endl;
-                return 1;
+            // 源文件含明文：-k 保留，否则按 -w 覆写后删除
+            if (keep_source) {
+                std::cout << "加密成功，源文件已保留。输出文件: " << output << std::endl;
+            } else {
+                secure_delete(input_file, overwrite_passes);
+                std::cout << "加密成功，源文件已删除。输出文件: " << output << std::endl;
             }
+        } else {
             std::cout << "解密文件: " << input_file << std::endl;
             // 解密时，如果提供了 -p，直接使用；否则交互式输入（不需要确认）
             std::string final_pwd = get_password("输入密码: ", false, pwd_provided ? password : "");
-            std::string output = input_file.substr(0, input_file.size() - 4);
             decrypt_file(input_file, output, final_pwd);
-        } else {
-            std::cerr << "未知模式: " << mode << std::endl;
-            return 1;
+            // 加密文件本身是密文、不含明文残留，因此不做覆写，直接删除（与 GUI 一致）
+            if (keep_source) {
+                std::cout << "解密成功，加密文件已保留。输出文件: " << output << std::endl;
+            } else {
+                secure_delete(input_file, 0);
+                std::cout << "解密成功，加密文件已删除。输出文件: " << output << std::endl;
+            }
         }
     } catch (const std::exception& e) {
         std::cerr << "错误: " << e.what() << std::endl;

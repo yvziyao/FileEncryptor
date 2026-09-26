@@ -1641,6 +1641,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     g_exe_dir = GetExeDirectoryW();
 
+    // 必须在创建任何窗口之前声明 DPI 感知。
+    // 默认进程是 DPI 未感知的，系统会把整个窗口位图拉伸，导致在 125% / 150% 等
+    // 缩放下界面发虚；声明为系统级感知后，UiPx() 按真实 DPI 计算尺寸，界面清晰。
+    // 这里用 SetProcessDPIAware()（Vista+，user32 一直导出），
+    // 不用 SetProcessDpiAwarenessContext()——那是 Win10 1607+ 的导出，
+    // 静态链接会让程序在 Win7/8 上因找不到入口点而无法启动。
+    SetProcessDPIAware();
+
     // 文件/文件夹选择对话框需要 COM
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
