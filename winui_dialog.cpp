@@ -33,6 +33,9 @@ std::wstring PickFolderDialog(HWND owner, const std::wstring& initial);
 #define IDC_UI_EDIT1 2001
 #define IDC_UI_EDIT2 2002
 #define IDC_UI_SHOW  2003
+#define IDC_UI_CHK_PROT 2004
+#define IDC_UI_TRIES    2005
+#define IDC_UI_DAYS     2006
 
 namespace {
 
@@ -226,6 +229,19 @@ struct UiDlgState {
     int  editInnerH = 0;
     int  editInnerOffset = 0;
 
+    // ---- 防暴力破解设置区（仅“设置密码”时显示）----
+    bool         showProtection = false;   // 是否显示该区域
+    UiProtection prot;                     // 当前值（打开时回填，确定时读回）
+    HWND         chkProt = nullptr;        // “输入错误密码 N 次后”复选框
+    HWND         editTries = nullptr;      // 次数输入框（ES_NUMBER）
+    HWND         editDays = nullptr;       // 锁定天数输入框（ES_NUMBER）
+    RECT         rChkProt{};
+    RECT         rTriesLabel{}, rTriesSuffix{}, rTriesEdit{};
+    RECT         rSeg{}, rDaysLabel{}, rDaysEdit{};
+    std::vector<RECT> protItemRc;          // 分段控件两项
+    RECT         rRemain{};                // 解密时“还能尝试 X 次”红字
+    int          remainTries = -1;         // <0 表示不显示
+
     HBRUSH altBrush = nullptr;
 
     // 动画
@@ -257,6 +273,8 @@ void EnsureDlgAnimation(HWND hDlg);
 void PositionButtons(UiDlgState* st);
 void RelayoutDialog(HWND hDlg, UiDlgState* st);
 void ApplySettingsRowChange(HWND hDlg, UiDlgState* st, int key);
+// 按复选框状态启用/禁用保护区的输入框（关闭时置灰）
+void SyncProtectionEnabled(UiDlgState* st);
 void TickSettingsSlide(HWND hDlg, UiDlgState* st, float dt, bool& active);
 
 
@@ -394,6 +412,28 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
         MeasureText(dc, fBody, tr(L"显示密码", L"Show password"), maxBodyW, true, &chkW, &chkH);
         int minContent = UiPx(300);
         if (chkW + UiPx(30) > minContent) minContent = chkW + UiPx(30);
+
+        // 防暴力破解设置区比较宽（复选框 + 次数输入框 + 分段控件），要单独算最小宽度
+        if (st->showProtection) {
+            int w = 0, h = 0;
+            auto add = [&](const std::wstring& s) {
+                int tw = 0, th = 0;
+                MeasureText(dc, fBody, s, maxBodyW, true, &tw, &th);
+                w += tw;
+            };
+            w += UiPx(18) + UiPx(8);                       // 复选框
+            add(tr(L"输入错误密码", L"After"));
+            w += UiPx(6) + UiPx(56) + UiPx(6);             // 次数输入框
+            add(tr(L"次后", L"wrong attempts"));
+            w += UiPx(12);
+            add(tr(L"永久删除文件", L"Delete file"));
+            w += UiPx(14) * 2 + UiPx(10);
+            add(tr(L"禁止解密", L"Lock"));
+            w += UiPx(14) * 2;
+            if (w > minContent) minContent = w;
+            (void)h;
+        }
+
         winW = st->pad * 2 + MaxI(titleW, minContent);
         if (winW < minW) winW = minW;
         st->contentX = st->pad;
@@ -452,9 +492,72 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
             y += st->editH + UiPx(6);
             st->rStrength = { st->contentX, y, st->contentX + st->contentW, y + UiPx(18) };
             y += UiPx(18) + UiPx(8);
+
+            // ---- 防暴力破解设置区（密码强度下方、显示密码上方）----
+            if (st->showProtection) {
+                const int rowH = UiPx(28);
+                const int boxW = UiPx(18);
+                const int editW = UiPx(56);
+
+                int x = st->contentX;
+                st->rChkProt = { x, y, x + boxW, y + rowH };
+                x += boxW + UiPx(8);
+
+                int tw = 0, th = 0;
+                MeasureText(dc, fBody, tr(L"输入错误密码", L"After"), maxBodyW, true, &tw, &th);
+                st->rTriesLabel = { x, y, x + tw, y + rowH };
+                x += tw + UiPx(6);
+
+                st->rTriesEdit = { x, y + (rowH - UiPx(26)) / 2, x + editW, y + (rowH - UiPx(26)) / 2 + UiPx(26) };
+                x += editW + UiPx(6);
+
+                MeasureText(dc, fBody, tr(L"次后", L"wrong attempts"), maxBodyW, true, &tw, &th);
+                st->rTriesSuffix = { x, y, x + tw, y + rowH };
+                x += tw + UiPx(12);
+
+                // 分段控件：两项等宽
+                int w1 = 0, w2 = 0;
+                MeasureText(dc, fBody, tr(L"永久删除文件", L"Delete file"), maxBodyW, true, &w1, &th);
+                MeasureText(dc, fBody, tr(L"禁止解密", L"Lock"), maxBodyW, true, &w2, &th);
+                const int item1 = w1 + UiPx(28);
+                const int item2 = w2 + UiPx(28);
+                st->rSeg = { x, y, x + item1 + item2, y + rowH };
+                st->protItemRc.clear();
+                st->protItemRc.push_back({ x, y, x + item1, y + rowH });
+                st->protItemRc.push_back({ x + item1, y, x + item1 + item2, y + rowH });
+                y += rowH + UiPx(6);
+
+                // 第二行：锁定时长（仅“禁止解密”模式下显示）
+                if (st->prot.action == 1) {
+                    int lw = 0;
+                    MeasureText(dc, fBody, tr(L"锁定时长", L"Lock for"), maxBodyW, true, &lw, &th);
+                    int dx = st->contentX + boxW + UiPx(8);
+                    st->rDaysLabel = { dx, y, dx + lw, y + rowH };
+                    dx += lw + UiPx(6);
+                    st->rDaysEdit = { dx, y + (rowH - UiPx(26)) / 2, dx + editW, y + (rowH - UiPx(26)) / 2 + UiPx(26) };
+                    y += rowH + UiPx(6);
+                }
+                else {
+                    st->rDaysLabel = {};
+                    st->rDaysEdit = {};
+                }
+            }
+            else {
+                st->rChkProt = {};
+                st->rTriesEdit = {};
+                st->rDaysEdit = {};
+                st->protItemRc.clear();
+            }
         }
         else {
-            y += UiPx(8);
+            // 解密：受保护文件在密码框下方用红字提示还能尝试几次
+            if (st->remainTries >= 0) {
+                st->rRemain = { st->contentX, y, st->contentX + st->contentW, y + UiPx(20) };
+                y += UiPx(20) + UiPx(6);
+            }
+            else {
+                y += UiPx(8);
+            }
         }
 
         st->rChk = { st->contentX, y, st->contentX + st->contentW, y + UiPx(22) };
@@ -543,17 +646,24 @@ void DrawOwnerButton(LPDRAWITEMSTRUCT pdis) {
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+// 自绘复选框。密码框里有两个：
+//   IDC_UI_SHOW       “显示密码”，自带文字
+//   IDC_UI_CHK_PROT   防暴力破解开关，只画方框（后面的说明文字由父窗口绘制，
+//                     这样它才能与次数输入框、分段控件排在同一行）
 void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {
     const UiPalette& c = UiColors();
     RECT rc = pdis->rcItem;
     UiDoubleBuffer buffer(pdis->hDC, rc);
     HDC dc = buffer.Dc();
     UiFillRect(dc, rc, c.bg);   // 铺满，避免残留
+    const bool isProt = (pdis->CtlID == IDC_UI_CHK_PROT);
+    const bool checked = isProt ? st->prot.enabled : st->showPwd;
+
     const int box = UiPx(18);
     RECT boxRc = { rc.left, rc.top + (rc.bottom - rc.top - box) / 2,
                    rc.left + box, rc.top + (rc.bottom - rc.top - box) / 2 + box };
 
-    if (st->showPwd) {
+    if (checked) {
         UiDrawRoundRect(dc, boxRc, UiPx(4), true, c.accent, false, c.accent);
         HFONT iconFont = UiIconFont(UiPx(11));
         if (iconFont) {
@@ -565,6 +675,8 @@ void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {
     else {
         UiDrawRoundRect(dc, boxRc, UiPx(4), true, c.bgAlt, true, c.border);
     }
+
+    if (isProt) return;   // 说明文字由父窗口画
 
     RECT labelRc = { boxRc.right + UiPx(10), rc.top, rc.right, rc.bottom };
     UiDrawTextLine(dc, tr(L"显示密码", L"Show password"), labelRc,
@@ -705,6 +817,53 @@ void PaintNormalDialog(HDC dc, UiDlgState* st, const RECT& rcClient) {
                            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
 
+        // ---- 防暴力破解设置区（仅加密）----
+        if (st->confirm && st->showProtection) {
+            const bool on = st->prot.enabled;
+            const COLORREF labelColor = on ? c.text : c.textMuted;
+
+            UiDrawTextLine(dc, tr(L"输入错误密码", L"After"), st->rTriesLabel, fBody, labelColor,
+                           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            UiDrawTextLine(dc, tr(L"次后", L"wrong attempts"), st->rTriesSuffix, fBody, labelColor,
+                           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            // 分段控件容器 + 选中底色（与设置面板同款观感）
+            UiDrawRoundRect(dc, st->rSeg, UiPx(5), true, c.bgAlt, true, c.border);
+            for (size_t k = 0; k < st->protItemRc.size(); ++k) {
+                RECT ir = st->protItemRc[k];
+                InflateRect(&ir, -UiPx(2), -UiPx(2));
+                const bool sel = on && ((int)k == st->prot.action);
+                if (sel) UiDrawRoundRect(dc, ir, UiPx(4), true, c.accent, false, c.accent);
+                const std::wstring label = (k == 0) ? tr(L"永久删除文件", L"Delete file")
+                                                    : tr(L"禁止解密", L"Lock");
+                UiDrawTextLine(dc, label, ir, fBody,
+                               sel ? c.onAccent : (on ? c.text : c.textMuted),
+                               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+
+            // 第二行：锁定时长（仅“禁止解密”模式）
+            if (st->prot.action == 1) {
+                UiDrawTextLine(dc, tr(L"锁定时长", L"Lock for"), st->rDaysLabel, fBody, labelColor,
+                               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                int dw = 0, dh = 0;
+                MeasureText(dc, fBody, tr(L"天", L"days"), UiPx(120), true, &dw, &dh);
+                RECT dr = st->rDaysEdit;
+                dr.left = dr.right + UiPx(6);
+                dr.right = dr.left + dw;
+                UiDrawTextLine(dc, tr(L"天", L"days"), dr, fBody, labelColor,
+                               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+
+        // ---- 解密：红字提示还能尝试几次 ----
+        if (!st->confirm && st->remainTries >= 0) {
+            const std::wstring s = tr(L"还能尝试 ", L"Attempts left: ")
+                                 + std::to_wstring(st->remainTries)
+                                 + tr(L" 次", L"");
+            UiDrawTextLine(dc, s, st->rRemain, fBody, c.danger,
+                           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+
         if (!st->error.empty()) {
             RECT r = st->rError;
             UiDrawTextLine(dc, st->error, r, fSmall, c.danger,
@@ -796,7 +955,9 @@ void SetEditPasswordMask(HWND edit, bool show) {
     UpdateWindow(edit);
 }
 
-void ApplyEditTheme(HWND edit, const UiDlgState* st) {
+// mask=true 时套用密码掩码。保护区的数字输入框必须传 false，
+// 否则会被当成密码框显示成一串星号。
+void ApplyEditTheme(HWND edit, const UiDlgState* st, bool mask = true) {
     if (!edit) return;
     UiDetheme(edit);
     RECT rc;
@@ -804,7 +965,7 @@ void ApplyEditTheme(HWND edit, const UiDlgState* st) {
     const int r = UiPx(5) * 2;
     HRGN rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1, r, r);
     if (rgn) SetWindowRgn(edit, rgn, TRUE);
-    SetEditPasswordMask(edit, st->showPwd);
+    if (mask) SetEditPasswordMask(edit, st->showPwd);
 }
 
 // ---------- 对话框动画 ----------
@@ -902,6 +1063,28 @@ void PositionButtons(UiDlgState* st) {
 }
 
 // 分段选项变化后重新布局：“指定目录”的提示行会让窗口变高/变矮
+// 把密码框的子控件摆到 ComputeLayout 算出的位置。
+// 保护区分段控件切换模式时窗口高度会变，必须重新摆放（含显示/隐藏锁定时长输入框）。
+void PositionPasswordControls(UiDlgState* st) {
+    if (!st->isPassword) return;
+    auto move = [](HWND h, const RECT& r, bool visible) {
+        if (!h) return;
+        SetWindowPos(h, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(h, visible ? SW_SHOW : SW_HIDE);
+    };
+    RECT none = {};
+    move(st->edit1, st->rEdit1Inner, true);
+    move(st->edit2, st->rEdit2Inner, st->confirm);
+    move(st->chkShow, st->rChk, true);
+    if (st->showProtection) {
+        const bool showDays = (st->prot.action == 1);
+        move(st->chkProt, st->rChkProt, true);
+        move(st->editTries, st->rTriesEdit, true);
+        move(st->editDays, showDays ? st->rDaysEdit : none, showDays);
+    }
+}
+
 void RelayoutDialog(HWND hDlg, UiDlgState* st) {
     HDC screen = GetDC(NULL);
     HDC mem = CreateCompatibleDC(screen);
@@ -915,6 +1098,7 @@ void RelayoutDialog(HWND hDlg, UiDlgState* st) {
     const int cy = wr.top + (wr.bottom - wr.top) / 2;
     SetWindowPos(hDlg, NULL, cx - st->winW / 2, cy - st->winH / 2, st->winW, st->winH,
                  SWP_NOZORDER | SWP_NOACTIVATE);
+    PositionPasswordControls(st);
     PositionButtons(st);
     InvalidateRect(hDlg, NULL, FALSE);
 }
@@ -931,6 +1115,13 @@ void ApplySettingsRowChange(HWND hDlg, UiDlgState* st, int key) {
         break;
     }
     RelayoutDialog(hDlg, st);
+}
+
+// 按复选框状态启用/禁用保护区的输入框（关闭时置灰）
+void SyncProtectionEnabled(UiDlgState* st) {
+    const bool on = st->prot.enabled;
+    if (st->editTries) EnableWindow(st->editTries, on);
+    if (st->editDays)  EnableWindow(st->editDays, on);
 }
 
 // 自绘窗口没有对话框管理器，Tab 焦点切换需要自己实现
@@ -999,6 +1190,46 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 UiDetheme(st->chkShow);
                 AttachHover(st->chkShow);
             }
+
+            // ---- 防暴力破解设置区的子控件 ----
+            if (st->showProtection) {
+                auto makeNumEdit = [&](int id, const RECT& r) {
+                    HWND e = CreateWindowExW(0, L"EDIT", L"",
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL,
+                        r.left, r.top, r.right - r.left, r.bottom - r.top,
+                        hwnd, (HMENU)(INT_PTR)id, inst, NULL);
+                    if (e) {
+                        SendMessageW(e, WM_SETFONT, (WPARAM)UiFont(UiPx(14), false), TRUE);
+                        SendMessageW(e, EM_SETLIMITTEXT, 4, 0);   // 9999 / 3650
+                        ApplyEditTheme(e, st, false);            // 数字框不能套密码掩码
+                    }
+                    return e;
+                };
+
+                st->chkProt = CreateWindowExW(0, L"BUTTON", L"",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                    st->rChkProt.left, st->rChkProt.top,
+                    st->rChkProt.right - st->rChkProt.left,
+                    st->rChkProt.bottom - st->rChkProt.top,
+                    hwnd, (HMENU)(INT_PTR)IDC_UI_CHK_PROT, inst, NULL);
+                if (st->chkProt) {
+                    UiDetheme(st->chkProt);
+                    AttachHover(st->chkProt);
+                    SendMessageW(st->chkProt, BM_SETCHECK, st->prot.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+                }
+
+                st->editTries = makeNumEdit(IDC_UI_TRIES, st->rTriesEdit);
+                if (st->editTries)
+                    SetWindowTextW(st->editTries, std::to_wstring(st->prot.maxTries).c_str());
+
+                st->editDays = makeNumEdit(IDC_UI_DAYS, st->rDaysEdit);
+                if (st->editDays) {
+                    SetWindowTextW(st->editDays, std::to_wstring(st->prot.lockDays).c_str());
+                    // 只有“禁止解密”模式下才显示锁定时长
+                    ShowWindow(st->editDays, st->prot.action == 1 ? SW_SHOW : SW_HIDE);
+                }
+                SyncProtectionEnabled(st);
+            }
         }
 
         // 按钮：先按 0 尺寸创建，随后统一从右向左排布
@@ -1046,8 +1277,10 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         LPDRAWITEMSTRUCT pdis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
         if (!pdis || !st) break;
         if (pdis->CtlType == ODT_BUTTON) {
-            if (pdis->CtlID == IDC_UI_SHOW) DrawOwnerCheckbox(pdis, st);
-            else                            DrawOwnerButton(pdis);
+            if (pdis->CtlID == IDC_UI_SHOW || pdis->CtlID == IDC_UI_CHK_PROT)
+                DrawOwnerCheckbox(pdis, st);
+            else
+                DrawOwnerButton(pdis);
             return TRUE;
         }
         break;
@@ -1062,6 +1295,8 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // 输入框白框（比真实 EDIT 大一圈）也要接收点击，否则点到留白会变成拖动窗口
             if (PtInRect(&st->rEdit1, pt)) return HTCLIENT;
             if (st->confirm && PtInRect(&st->rEdit2, pt)) return HTCLIENT;
+            // 保护区的分段控件由父窗口自绘并处理点击
+            if (st->showProtection && PtInRect(&st->rSeg, pt)) return HTCLIENT;
         }
         if (st->isSettings) {
             for (const auto& r : st->rows) {
@@ -1097,6 +1332,21 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (st->isPassword) {
             if (st->edit1 && PtInRect(&st->rEdit1, pt)) { SetFocus(st->edit1); return 0; }
             if (st->confirm && st->edit2 && PtInRect(&st->rEdit2, pt)) { SetFocus(st->edit2); return 0; }
+
+            // 保护区的“永久删除文件 / 禁止解密”分段控件：点一下即切换
+            if (st->showProtection && PtInRect(&st->rSeg, pt)) {
+                for (size_t k = 0; k < st->protItemRc.size(); ++k) {
+                    if (!PtInRect(&st->protItemRc[k], pt)) continue;
+                    if (st->prot.action != (int)k) {
+                        st->prot.action = (int)k;
+                        // 两行高度不同，“禁止解密”多一行锁定时长 -> 需要重新布局
+                        RelayoutDialog(hwnd, st);
+                    }
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+                return 0;
+            }
         }
         break;
     }
@@ -1129,6 +1379,17 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        if (id == IDC_UI_CHK_PROT) {
+            st->prot.enabled = !st->prot.enabled;
+            if (st->chkProt) {
+                SendMessageW(st->chkProt, BM_SETCHECK, st->prot.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+                InvalidateRect(st->chkProt, NULL, FALSE);
+            }
+            SyncProtectionEnabled(st);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
         if (id == IDOK || id == IDCANCEL || id == IDYES || id == IDNO) {
             if (st->isPassword && id == IDOK) {
                 wchar_t buf1[256] = {};
@@ -1155,6 +1416,49 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (st->edit2) SetFocus(st->edit2);
                     return 0;
                 }
+
+                // 读取并校验防暴力破解设置。非法值给出行内红字，不静默纠正为合法值。
+                if (st->showProtection && st->prot.enabled) {
+                    wchar_t tb[16] = {};
+                    wchar_t db[16] = {};
+                    if (st->editTries) GetWindowTextW(st->editTries, tb, _countof(tb));
+                    if (st->editDays)  GetWindowTextW(st->editDays, db, _countof(db));
+
+                    auto parseNum = [](const wchar_t* s, int& out) {
+                        if (!s || !*s) return false;          // 空视为非法，提示用户填写
+                        long long v = 0;
+                        for (const wchar_t* p = s; *p; ++p) {
+                            if (*p < L'0' || *p > L'9') return false;
+                            v = v * 10 + (*p - L'0');
+                            if (v > 100000) return false;
+                        }
+                        out = (int)v;
+                        return true;
+                    };
+
+                    int tries = 0;
+                    if (!parseNum(tb, tries) || tries < 1 || tries > 9999) {
+                        st->error = tr(L"错误尝试次数需为 1-9999 的整数", L"Attempts must be an integer from 1 to 9999");
+                        MessageBeep(MB_ICONWARNING);
+                        InvalidateRect(hwnd, NULL, FALSE);
+                        if (st->editTries) SetFocus(st->editTries);
+                        return 0;
+                    }
+                    st->prot.maxTries = tries;
+
+                    if (st->prot.action == 1) {
+                        int days = 0;
+                        if (!parseNum(db, days) || days < 0 || days > 3650) {
+                            st->error = tr(L"锁定时长需为 0-3650 的整数", L"Lock days must be an integer from 0 to 3650");
+                            MessageBeep(MB_ICONWARNING);
+                            InvalidateRect(hwnd, NULL, FALSE);
+                            if (st->editDays) SetFocus(st->editDays);
+                            return 0;
+                        }
+                        st->prot.lockDays = days;
+                    }
+                }
+
                 st->password = buf1;
             }
             st->result = id;
@@ -1413,7 +1717,8 @@ int UiShowMessage(HWND owner, const UiMessage& m) {
 }
 
 bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
-                    const std::wstring& subtitle) {
+                    const std::wstring& subtitle, bool showProtection,
+                    UiProtection* ioProt, int remainTries) {
     UiDlgState st;
     st.isPassword = true;
     st.confirm = confirm;
@@ -1424,9 +1729,16 @@ bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
     st.primaryId = IDOK;
     st.cancelId = IDCANCEL;
 
+    // 只有加密时才显示保护设置区
+    st.showProtection = confirm && showProtection && ioProt != nullptr;
+    if (st.showProtection) st.prot = *ioProt;
+    // 解密时由调用方给出剩余次数用于红字提示，-1 表示不显示
+    st.remainTries = confirm ? -1 : remainTries;
+
     const int r = RunDialog(owner, &st);
     if (r == IDOK) {
         outPassword = WstringToUtf8(st.password);
+        if (st.showProtection && ioProt) *ioProt = st.prot;
         return true;
     }
     return false;

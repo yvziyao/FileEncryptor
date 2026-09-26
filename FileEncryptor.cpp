@@ -13,10 +13,12 @@
 #include <cstdint>
 #include <memory>
 #include <cstring>
+#include <ctime>
 #include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\evp.h"
 #include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\rand.h"
 #include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\err.h"
 #include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\aes.h"
+#include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\hmac.h"
 #include "resource.h"
 #include "app_settings.h"
 #include "winui_password.h"
@@ -90,15 +92,41 @@ static void ProgressEndFile();
 static void ProgressFinish();
 static void CollectFilesRecursive(const std::wstring& path, std::vector<std::wstring>& out);
 static void SecureDeleteFile(const std::wstring& wPath, int passes);
+
+// 防暴力破解策略：加密时写入文件头，由解密方读取并执行
+// （定义放在这里，因为下面几个前置声明要用到）
+enum class ProtectionAction { Delete = 0, Lock = 1 };
+
+struct Protection {
+    bool             enabled = false;
+    int              maxTries = 3;                  // 1..9999
+    ProtectionAction action = ProtectionAction::Delete;
+    int              lockDays = 7;                  // 0..3650
+};
+
 static void StartProcessing(std::vector<std::wstring> files,
                             std::vector<std::string> perFilePasswords,
-                            std::string singlePassword);
+                            std::string singlePassword,
+                            std::vector<Protection> perFileProts,
+                            Protection singleProt);
 static void ShowUiMessage(HWND owner, UiIcon icon, const std::wstring& caption,
                           const std::wstring& text, bool topmost);
 static void ApplyProgressBarTheme();
 static void ShowSettingsDialog(HWND owner);
 static LRESULT HandleAskOutputPath(HWND hWnd, LPARAM lParam);
 static std::wstring PasswordSubtitle(const std::wstring& file, size_t index, size_t total);
+
+// 收集密码的结果
+enum class PwdCollect { Ok, Cancelled, Blocked };
+
+// 加密前收集密码，同时让用户配置该文件的防暴力破解策略
+static bool CollectEncryptPassword(HWND owner, const std::wstring& subtitle,
+                                   std::string& outPwd, Protection& outProt,
+                                   bool allowProtection);
+// 解密前收集密码：受保护文件会显示剩余次数，输错则扣减并重新弹框。
+// blockedMsg 在返回 Blocked 时给出原因（锁定中 / 次数用尽）。
+static PwdCollect CollectDecryptPassword(HWND owner, const std::wstring& file,
+                                         std::string& outPwd, std::wstring& blockedMsg);
 
 // 投递到主线程显示的提示框负载
 struct UiMessagePayload {
@@ -157,24 +185,63 @@ static std::string wstring_to_utf8(const std::wstring& w) {
 // 再启动一个自身进程来显示，导致无法跟随语言与主题切换。
 // 现在统一交给进程内的 WinUI 3 风格自绘对话框层（winui_dialog.cpp）。
 bool ShowPasswordDialog(HWND hWnd, std::string& password, bool confirm,
-                        const std::wstring& subtitle = std::wstring()) {
-    return ShowPasswordDialogWinUI(hWnd, password, confirm, subtitle);
+                        const std::wstring& subtitle = std::wstring(),
+                        bool showProtection = false,
+                        UiProtection* ioProt = nullptr,
+                        int remainTries = -1) {
+    return ShowPasswordDialogWinUI(hWnd, password, confirm, subtitle,
+                                   showProtection, ioProt, remainTries);
 }
 
 
 // ---------- 加密核心类 ----------
-// 文件格式 v1（AES-256-GCM）：
-//   magic[8]      "FENC\r\n\x1a\n"  用于与旧格式（直接以 salt 开头）区分
-//   version[1]    = 1
-//   reserved[1]   = 0
-//   iterations[4] PBKDF2-HMAC-SHA256 迭代次数（小端），即“加密强度”
-//   salt[16]
-//   iv[12]        GCM 推荐 96-bit nonce
-//   ciphertext[N] 与明文等长（GCM 是流模式，无需填充）
-//   tag[16]       GCM 认证标签
+// 文件格式 v2（AES-256-GCM，与 CLI 版完全一致）：
+//   0  magic[8]      "FENC\r\n\x1a\n"
+//   8  version[1]    = 2
+//   9  flags[1]      bit0 启用防暴力破解, bit1 模式(0=永久删除, 1=限时锁定)
+//  10  iterations[4] PBKDF2-HMAC-SHA256 迭代次数（小端），即“加密强度”
+//  14  maxTries[2]   允许的错误尝试次数
+//  16  lockDays[2]   限时锁定模式下的锁定时长（天）
+//  18  salt[16]
+//  34  iv[12]        GCM 推荐 96-bit nonce
+//  46  verifier[8]   密码验证标签（快速判断密码对错，无需解密正文）
+//  54  remaining[2]  ← 可变（每次解密失败 -1）
+//  56  lockUntil[8]  ← 可变（Unix 秒，0 = 未锁定）
+//  64  ciphertext[N] 与明文等长（GCM 是流模式，无需填充）
+//  末尾 tag[16]      GCM 认证标签
 //
-// 旧格式（AES-256-CBC：salt[16] + iv[16] + ciphertext，迭代 100000）仍可解密，
-// 保证此前加密的文件不会失效。
+// 偏移 8..54 作为 AAD 参与认证，保护策略无法被篡改后关闭；
+// 偏移 54..64 需在无正确密码时可写，故不参与认证。
+// 只支持 v2；历史格式（v1 / 最旧的 CBC）不再读取。
+//
+// 从加密文件头读出的保护状态
+struct FileProtState {
+    bool     isV2 = false;
+    bool     isProtected = false;
+    ProtectionAction action = ProtectionAction::Delete;
+    int      maxTries = 0;
+    int      remaining = 0;
+    int      lockDays = 0;
+    uint64_t lockUntil = 0;                         // Unix 秒，0 = 未锁定
+};
+
+// 快速校验密码的结果
+enum class ProtVerify { Ok, Wrong, Unavailable };
+
+// 把剩余秒数格式化成“X 天 Y 小时 Z 分钟”，用于锁定期提示
+static std::wstring FormatDuration(uint64_t seconds) {
+    const uint64_t days = seconds / 86400;
+    const uint64_t hours = (seconds % 86400) / 3600;
+    const uint64_t mins = (seconds % 3600) / 60;
+    std::wstring s;
+    if (days > 0)  s += std::to_wstring(days) + tr(L" 天 ", L"d ");
+    if (hours > 0) s += std::to_wstring(hours) + tr(L" 小时 ", L"h ");
+    if (days == 0 && mins > 0) s += std::to_wstring(mins) + tr(L" 分钟", L"min");
+    if (s.empty()) s = tr(L"不到 1 分钟", L"less than a minute");
+    while (!s.empty() && s.back() == L' ') s.pop_back();
+    return s;
+}
+
 class FileEncryptor {
 private:
     struct EVP_CIPHER_CTX_deleter {
@@ -191,21 +258,42 @@ private:
     static const size_t kSaltLen = 16;
     static const size_t kIvLen = 12;      // GCM 推荐 96-bit
     static const size_t kTagLen = 16;
-    static const size_t kHeaderLen = 8 + 1 + 1 + 4 + kSaltLen + kIvLen;   // 42
+    static const size_t kHeaderLenV2 = 64;
+    static const size_t kAadOff = 8;
+    static const size_t kAadLen = 46;      // 8..54
+    static const size_t kRemOff = 54;
+    static const size_t kLockOff = 56;
+    static const uint8_t kFlagProtected = 0x01;
+    static const uint8_t kFlagModeLock = 0x02;
 
     static const uint8_t* Magic() {
         static const uint8_t m[8] = { 'F', 'E', 'N', 'C', '\r', '\n', 0x1A, '\n' };
         return m;
     }
 
+    static void PutU16(std::vector<uint8_t>& v, uint16_t x) {
+        v.push_back((uint8_t)(x & 0xFF));
+        v.push_back((uint8_t)((x >> 8) & 0xFF));
+    }
     static void PutU32(std::vector<uint8_t>& v, uint32_t x) {
         v.push_back((uint8_t)(x & 0xFF));
         v.push_back((uint8_t)((x >> 8) & 0xFF));
         v.push_back((uint8_t)((x >> 16) & 0xFF));
         v.push_back((uint8_t)((x >> 24) & 0xFF));
     }
+    static void PutU64(std::vector<uint8_t>& v, uint64_t x) {
+        for (int i = 0; i < 8; ++i) v.push_back((uint8_t)((x >> (8 * i)) & 0xFF));
+    }
+    static uint16_t GetU16(const uint8_t* p) {
+        return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+    }
     static uint32_t GetU32(const uint8_t* p) {
         return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    }
+    static uint64_t GetU64(const uint8_t* p) {
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) v |= ((uint64_t)p[i]) << (8 * i);
+        return v;
     }
 
     static std::vector<uint8_t> DeriveKey(const std::string& password,
@@ -221,13 +309,145 @@ private:
         return key;
     }
 
+    // 密码验证标签：让“密码对不对”只需 PBKDF2 + 一次 HMAC，无需解密正文
+    static std::vector<uint8_t> VerifierOf(const std::vector<uint8_t>& key) {
+        static const char kLabel[] = "FileEncryptor/v2/verify";
+        unsigned char mac[EVP_MAX_MD_SIZE] = {};
+        unsigned int macLen = 0;
+        if (HMAC(EVP_sha256(), key.data(), (int)key.size(),
+                 (const unsigned char*)kLabel, sizeof(kLabel) - 1, mac, &macLen) == nullptr) {
+            throw std::runtime_error("计算验证标签失败");
+        }
+        return std::vector<uint8_t>(mac, mac + 8);
+    }
+
     static void DecryptImpl(const std::wstring& input_path, const std::wstring& out_path,
                             const std::string& password);
 
 public:
-    // 加密：始终写出新格式（AES-256-GCM）
+    // ---- 防暴力破解：读取 / 扣减 / 快速校验 ----
+    // 这些都在 UI 线程的“收集密码”阶段调用，不进 worker。
+
+    static uint64_t NowUnix() { return (uint64_t)time(nullptr); }
+
+    // 读取文件头中的保护状态；返回 false 表示不是有效的 v2 加密文件
+    static bool ReadProtState(const std::wstring& path, FileProtState& out) {
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        HandleGuard guard(h);
+
+        uint8_t hdr[kHeaderLenV2] = {};
+        DWORD got = 0;
+        if (!ReadFile(h, hdr, (DWORD)kHeaderLenV2, &got, NULL) || got != kHeaderLenV2) return false;
+        if (memcmp(hdr, Magic(), 8) != 0) return false;
+        if (hdr[8] != 2) return false;
+
+        out.isV2 = true;
+        const uint8_t flags = hdr[9];
+        out.isProtected = (flags & kFlagProtected) != 0;
+        out.action = (flags & kFlagModeLock) ? ProtectionAction::Lock : ProtectionAction::Delete;
+        out.maxTries = (int)GetU16(&hdr[14]);
+        out.lockDays = (int)GetU16(&hdr[16]);
+        out.remaining = (int)GetU16(&hdr[kRemOff]);
+        out.lockUntil = GetU64(&hdr[kLockOff]);
+        return true;
+    }
+
+    // 只改写可变部分（剩余次数 / 锁定截止），不动密文。
+    // 这两个字段刻意不在 AAD 内，所以改写不会破坏 GCM 认证。
+    static bool WriteMutableState(const std::wstring& path, int remaining, uint64_t lockUntil) {
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        HandleGuard guard(h);
+
+        uint8_t buf[10];
+        buf[0] = (uint8_t)(remaining & 0xFF);
+        buf[1] = (uint8_t)((remaining >> 8) & 0xFF);
+        for (int i = 0; i < 8; ++i) buf[2 + i] = (uint8_t)((lockUntil >> (8 * i)) & 0xFF);
+
+        LARGE_INTEGER off;
+        off.QuadPart = (LONGLONG)kRemOff;
+        if (!SetFilePointerEx(h, off, NULL, FILE_BEGIN)) return false;
+        DWORD bw = 0;
+        if (!WriteFile(h, buf, sizeof(buf), &bw, NULL) || bw != sizeof(buf)) return false;
+        FlushFileBuffers(h);
+        return true;
+    }
+
+    // 快速校验密码：读头部 + PBKDF2 + HMAC 比对，**不解密正文**。
+    // GUI 的重试循环依赖这一点：输错一次不必把整个文件过一遍。
+    static ProtVerify VerifyPassword(const std::wstring& path, const std::string& password,
+                                     FileProtState& out) {
+        if (!ReadProtState(path, out)) return ProtVerify::Unavailable;
+
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) return ProtVerify::Unavailable;
+        HandleGuard guard(h);
+
+        uint8_t hdr[kHeaderLenV2] = {};
+        DWORD got = 0;
+        if (!ReadFile(h, hdr, (DWORD)kHeaderLenV2, &got, NULL) || got != kHeaderLenV2)
+            return ProtVerify::Unavailable;
+
+        const int iterations = (int)GetU32(&hdr[10]);
+        if (iterations < 1000 || iterations > 10000000) return ProtVerify::Unavailable;
+
+        std::vector<uint8_t> salt(kSaltLen);
+        memcpy(salt.data(), &hdr[18], kSaltLen);
+
+        std::vector<uint8_t> key = DeriveKey(password, salt, iterations);
+        std::vector<uint8_t> expect = VerifierOf(key);
+
+        uint8_t diff = 0;
+        for (size_t i = 0; i < expect.size(); ++i) diff |= (uint8_t)(expect[i] ^ hdr[46 + i]);
+        return diff == 0 ? ProtVerify::Ok : ProtVerify::Wrong;
+    }
+
+    // 一次解密失败之后调用：扣减次数，必要时执行后果（删除文件 / 写入锁定截止）。
+    // 返回扣减后的剩余次数；<=0 表示已经用尽。outMsg 是给用户看的说明。
+    static int ConsumeAttempt(const std::wstring& path, const FileProtState& st,
+                              std::wstring& outMsg) {
+        if (!st.isProtected) return -1;
+
+        // 已处于锁定期且尚未到期：不重复扣减
+        if (st.lockUntil != 0 && NowUnix() < st.lockUntil) {
+            outMsg = tr(L"已锁定，剩余 ", L"Locked, remaining ")
+                   + FormatDuration(st.lockUntil - NowUnix());
+            return 0;
+        }
+
+        int remaining = st.remaining - 1;
+        if (remaining < 0) remaining = 0;
+
+        if (remaining > 0) {
+            WriteMutableState(path, remaining, 0);
+            outMsg = tr(L"还可尝试 ", L"Attempts left: ") + std::to_wstring(remaining)
+                   + tr(L" 次", L"");
+            return remaining;
+        }
+
+        if (st.action == ProtectionAction::Lock) {
+            const uint64_t until = NowUnix() + (uint64_t)st.lockDays * 86400ULL;
+            WriteMutableState(path, 0, until);
+            outMsg = tr(L"错误次数已达上限，已禁止解密 ", L"Too many failures; decryption disabled for ")
+                   + std::to_wstring(st.lockDays) + tr(L" 天", L" day(s)");
+            return 0;
+        }
+
+        // 永久删除：加密文件本身是密文，直接删除即可，无需覆写
+        DeleteFileW(path.c_str());
+        outMsg = tr(L"错误次数已达上限，加密文件已被永久删除",
+                    L"Too many failures; the encrypted file has been permanently deleted");
+        return 0;
+    }
+
+    // 加密：始终写出 v2 格式（AES-256-GCM，含防暴力破解策略字段）
     static void encryptFileTo(const std::wstring& input_path, const std::wstring& out_path,
-                              const std::string& password, int iterations) {
+                              const std::string& password, int iterations,
+                              const Protection& prot = Protection()) {
         const size_t CHUNK = 4 * 1024 * 1024; // 4MB
         if (iterations <= 0) iterations = 100000;
 
@@ -251,16 +471,27 @@ public:
         if (hOutFile == INVALID_HANDLE_VALUE) throw std::runtime_error("无法创建输出文件");
         HandleGuard outGuard(hOutFile);
 
-        // 文件头
+        // 文件头（v2）
         std::vector<uint8_t> header;
-        header.reserve(kHeaderLen);
+        header.reserve(kHeaderLenV2);
         const uint8_t* magic = Magic();
         header.insert(header.end(), magic, magic + 8);
-        header.push_back(1);                       // version
-        header.push_back(0);                       // reserved
+        header.push_back(2);                       // version
+        header.push_back((uint8_t)(prot.enabled
+            ? (kFlagProtected | (prot.action == ProtectionAction::Lock ? kFlagModeLock : 0))
+            : 0));                                 // flags
         PutU32(header, (uint32_t)iterations);
+        PutU16(header, (uint16_t)(prot.enabled ? prot.maxTries : 0));
+        PutU16(header, (uint16_t)(prot.enabled && prot.action == ProtectionAction::Lock
+                                      ? prot.lockDays : 0));
         header.insert(header.end(), salt.begin(), salt.end());
         header.insert(header.end(), iv.begin(), iv.end());
+        {
+            std::vector<uint8_t> verifier = VerifierOf(key);
+            header.insert(header.end(), verifier.begin(), verifier.end());
+        }
+        PutU16(header, (uint16_t)(prot.enabled ? prot.maxTries : 0));   // remaining
+        PutU64(header, 0);                                              // lockUntil
         DWORD bytesWritten = 0;
         WriteFile(hOutFile, header.data(), (DWORD)header.size(), &bytesWritten, NULL);
 
@@ -272,6 +503,14 @@ public:
             throw std::runtime_error("设置GCM IV长度失败");
         if (EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), iv.data()) != 1)
             throw std::runtime_error("设置密钥失败");
+        // AAD：版本/标志/迭代次数/保护策略/salt/IV 一并纳入认证，
+        // 攻击者无法通过改动这些字节“关掉保护”（改了就会认证失败）
+        {
+            int aadOut = 0;
+            if (EVP_EncryptUpdate(ctx.get(), nullptr, &aadOut,
+                                  header.data() + kAadOff, (int)kAadLen) != 1)
+                throw std::runtime_error("写入AAD失败");
+        }
 
         std::vector<uint8_t> inbuf(CHUNK);
         std::vector<uint8_t> outbuf(CHUNK + 32);
@@ -325,45 +564,28 @@ void FileEncryptor::DecryptImpl(const std::wstring& input_path, const std::wstri
     if (!GetFileSizeEx(hFile, &fileSizeLI)) throw std::runtime_error("获取文件大小失败");
     const uint64_t fileSize = (uint64_t)fileSizeLI.QuadPart;
 
-    // 嗅探文件头：新版以魔数开头，旧版直接是随机 salt
-    uint8_t head[8] = {};
+    // 只认 v2 格式：固定 64 字节文件头，AAD 一律读取
+    uint8_t hdr[kHeaderLenV2] = {};
     DWORD got = 0;
-    if (!ReadFile(hFile, head, 8, &got, NULL) || got != 8) throw std::runtime_error("加密文件过小或已被截断");
-    const bool isNewFormat = (memcmp(head, Magic(), 8) == 0);
+    if (!ReadFile(hFile, hdr, (DWORD)kHeaderLenV2, &got, NULL) || got != kHeaderLenV2)
+        throw std::runtime_error("不是有效的加密文件（文件过小或已被截断）");
+    if (memcmp(hdr, Magic(), 8) != 0)
+        throw std::runtime_error("不是有效的加密文件（文件标识不匹配）");
+    if (hdr[8] != 2)
+        throw std::runtime_error("不支持的加密文件版本");
 
-    std::vector<uint8_t> salt(kSaltLen);
-    std::vector<uint8_t> iv;
-    int iterations = 100000;      // 旧格式固定 100000
-    size_t prefixLen = 0;
+    const int iterations = (int)GetU32(&hdr[10]);
+    if (iterations < 1000 || iterations > 10000000)
+        throw std::runtime_error("文件头中的迭代次数非法");
 
-    if (isNewFormat) {
-        uint8_t meta[1 + 1 + 4] = {};
-        if (!ReadFile(hFile, meta, sizeof(meta), &got, NULL) || got != sizeof(meta))
-            throw std::runtime_error("读取文件头失败");
-        if (meta[0] != 1) throw std::runtime_error("不支持的加密文件版本");
-        iterations = (int)GetU32(&meta[2]);
-        if (iterations < 1000 || iterations > 10000000)
-            throw std::runtime_error("文件头中的迭代次数非法");
+    std::vector<uint8_t> salt(kSaltLen), iv(kIvLen);
+    memcpy(salt.data(), &hdr[18], kSaltLen);
+    memcpy(iv.data(), &hdr[34], kIvLen);
 
-        if (!ReadFile(hFile, salt.data(), (DWORD)salt.size(), &got, NULL) || got != salt.size())
-            throw std::runtime_error("读取盐失败");
-        iv.resize(kIvLen);
-        if (!ReadFile(hFile, iv.data(), (DWORD)iv.size(), &got, NULL) || got != iv.size())
-            throw std::runtime_error("读取IV失败");
-        prefixLen = kHeaderLen;
-    }
-    else {
-        // 旧格式：salt[16] + iv[16] + CBC 密文
-        SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
-        if (!ReadFile(hFile, salt.data(), (DWORD)salt.size(), &got, NULL) || got != salt.size())
-            throw std::runtime_error("读取盐失败");
-        iv.resize(16);
-        if (!ReadFile(hFile, iv.data(), (DWORD)iv.size(), &got, NULL) || got != iv.size())
-            throw std::runtime_error("读取IV失败");
-        prefixLen = salt.size() + iv.size();
-    }
+    uint8_t aad[kAadLen] = {};
+    memcpy(aad, &hdr[kAadOff], kAadLen);
 
-    const uint64_t overhead = (uint64_t)prefixLen + (isNewFormat ? kTagLen : 0);
+    const uint64_t overhead = (uint64_t)kHeaderLenV2 + kTagLen;
     if (fileSize <= overhead) throw std::runtime_error("加密文件不完整");
 
     std::vector<uint8_t> key = DeriveKey(password, salt, iterations);
@@ -376,17 +598,14 @@ void FileEncryptor::DecryptImpl(const std::wstring& input_path, const std::wstri
     std::unique_ptr<EVP_CIPHER_CTX, EVP_CIPHER_CTX_deleter> ctx(EVP_CIPHER_CTX_new());
     if (!ctx) throw std::runtime_error("创建EVP上下文失败");
 
-    if (isNewFormat) {
-        if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
+    {
+        int aadOut = 0;
+        if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, (int)kIvLen, nullptr) != 1 ||
+            EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), iv.data()) != 1 ||
+            EVP_DecryptUpdate(ctx.get(), nullptr, &aadOut, aad, (int)kAadLen) != 1) {
             throw std::runtime_error("AES初始化失败");
-        if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, (int)kIvLen, nullptr) != 1)
-            throw std::runtime_error("设置GCM IV长度失败");
-        if (EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), iv.data()) != 1)
-            throw std::runtime_error("设置密钥失败");
-    }
-    else {
-        if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_cbc(), nullptr, key.data(), iv.data()) != 1)
-            throw std::runtime_error("AES初始化失败");
+        }
     }
 
     const uint64_t cipherLen = fileSize - overhead;
@@ -410,7 +629,7 @@ void FileEncryptor::DecryptImpl(const std::wstring& input_path, const std::wstri
         ProgressAdd(rd);
     }
 
-    if (isNewFormat) {
+    {
         uint8_t tag[kTagLen] = {};
         DWORD rd = 0;
         if (!ReadFile(hFile, tag, (DWORD)kTagLen, &rd, NULL) || rd != kTagLen)
@@ -420,12 +639,6 @@ void FileEncryptor::DecryptImpl(const std::wstring& input_path, const std::wstri
         int outlen = 0;
         if (EVP_DecryptFinal_ex(ctx.get(), outbuf.data(), &outlen) != 1)
             throw std::runtime_error("认证失败：密码错误或文件已被篡改");
-        if (outlen > 0) { DWORD bw = 0; WriteFile(hOutFile, outbuf.data(), outlen, &bw, NULL); }
-    }
-    else {
-        int outlen = 0;
-        if (EVP_DecryptFinal_ex(ctx.get(), outbuf.data(), &outlen) != 1)
-            throw std::runtime_error("解密失败：密码错误或文件已被篡改");
         if (outlen > 0) { DWORD bw = 0; WriteFile(hOutFile, outbuf.data(), outlen, &bw, NULL); }
     }
 
@@ -1054,11 +1267,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // - 全部为普通文件（加密）：询问是否对所有文件使用同一密码
         std::vector<std::string> perFilePasswords; // 为空表示使用 pwd_single
         std::string pwd_single;
+        std::vector<Protection> perFileProts;      // 与 perFilePasswords 同序
+        Protection prot_single;
 
         if (hasEnc) {
+            // ---- 解密：每个文件独立走「锁定检查 -> 校验 -> 扣减 -> 重试」 ----
             if (files.size() == 1) {
-                // 单文件解密：直接输入密码（不确认）
-                if (!ShowPasswordDialog(hWnd, pwd_single, false, files[0])) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                std::wstring blocked;
+                const PwdCollect r = CollectDecryptPassword(hWnd, files[0], pwd_single, blocked);
+                if (r == PwdCollect::Cancelled) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                if (r == PwdCollect::Blocked) {
+                    ShowUiMessage(hWnd, UiIcon::Error, tr(L"无法解密", L"Cannot decrypt"),
+                                  files[0] + L"\n" + blocked, true);
+                    SetStatusText(tr(L"已拒绝", L"Refused"));
+                    break;
+                }
             }
             else {
                 // 批量提示：带提示音并强制置顶，避免被其他窗口覆盖
@@ -1072,27 +1295,55 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 prompt.sound = true;
 
                 if (UiShowMessage(hWnd, prompt) == IDYES) {
+                    // 逐文件校验；被锁定或次数用尽的文件会被剔除，不进入处理队列
+                    std::vector<std::wstring> keptFiles;
+                    std::vector<std::string> keptPwd;
                     bool cancelled = false;
                     for (size_t i = 0; i < files.size(); ++i) {
                         std::string onepwd;
-                        if (!ShowPasswordDialog(hWnd, onepwd, false,
-                                                PasswordSubtitle(files[i], i, files.size()))) {
-                            cancelled = true;
-                            break;
+                        std::wstring blocked;
+                        const PwdCollect r = CollectDecryptPassword(hWnd, files[i], onepwd, blocked);
+                        if (r == PwdCollect::Cancelled) { cancelled = true; break; }
+                        if (r == PwdCollect::Blocked) {
+                            ShowUiMessage(hWnd, UiIcon::Error, tr(L"无法解密", L"Cannot decrypt"),
+                                          files[i] + L"\n" + blocked, true);
+                            continue;
                         }
-                        perFilePasswords.push_back(onepwd);
+                        keptFiles.push_back(files[i]);
+                        keptPwd.push_back(onepwd);
                     }
                     if (cancelled) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                    if (keptFiles.empty()) {
+                        SetStatusText(tr(L"没有可处理的文件", L"Nothing to process"));
+                        break;
+                    }
+                    files = keptFiles;
+                    perFilePasswords = keptPwd;
                 }
                 else {
-                    if (!ShowPasswordDialog(hWnd, pwd_single, false, files[0])) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                    // 所有文件使用同一密码：只以第一个文件为准做校验与重试。
+                    // 取舍：避免为 N 个文件逐个弹框；其余文件若密码不同，会在实际解密
+                    // 失败时于 worker 中各自扣减次数（见 StartProcessing 里的对应注释）。
+                    std::wstring blocked;
+                    const PwdCollect r = CollectDecryptPassword(hWnd, files[0], pwd_single, blocked);
+                    if (r == PwdCollect::Cancelled) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                    if (r == PwdCollect::Blocked) {
+                        ShowUiMessage(hWnd, UiIcon::Error, tr(L"无法解密", L"Cannot decrypt"),
+                                      files[0] + L"\n" + blocked, true);
+                        SetStatusText(tr(L"已拒绝", L"Refused"));
+                        break;
+                    }
                 }
             }
         }
         else {
+            // ---- 加密：密码框里可以同时配置防暴力破解策略 ----
             if (files.size() == 1) {
                 // 单文件加密：要求确认密码
-                if (!ShowPasswordDialog(hWnd, pwd_single, true, files[0])) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                if (!CollectEncryptPassword(hWnd, files[0], pwd_single, prot_single, true)) {
+                    SetStatusText(tr(L"已取消", L"Cancelled"));
+                    break;
+                }
             }
             else {
                 // 批量提示：带提示音并强制置顶，避免被其他窗口覆盖
@@ -1106,25 +1357,30 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 prompt.sound = true;
 
                 if (UiShowMessage(hWnd, prompt) == IDYES) {
-                    if (!ShowPasswordDialog(hWnd, pwd_single, true, files[0])) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                    if (!CollectEncryptPassword(hWnd, files[0], pwd_single, prot_single, true)) {
+                        SetStatusText(tr(L"已取消", L"Cancelled"));
+                        break;
+                    }
                 }
                 else {
                     bool cancelled = false;
                     for (size_t i = 0; i < files.size(); ++i) {
                         std::string onepwd;
-                        if (!ShowPasswordDialog(hWnd, onepwd, true,
-                                                PasswordSubtitle(files[i], i, files.size()))) {
+                        Protection oneprot;
+                        if (!CollectEncryptPassword(hWnd, PasswordSubtitle(files[i], i, files.size()),
+                                                    onepwd, oneprot, true)) {
                             cancelled = true;
                             break;
                         }
                         perFilePasswords.push_back(onepwd);
+                        perFileProts.push_back(oneprot);
                     }
                     if (cancelled) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
                 }
             }
         }
 
-        StartProcessing(files, perFilePasswords, pwd_single);
+        StartProcessing(files, perFilePasswords, pwd_single, perFileProts, prot_single);
         break;
     }
 
@@ -1255,13 +1511,31 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
 
             std::string password;
-            if (!ShowPasswordDialog(hWnd, password, encrypting, input_path)) {
-                SetStatusText(tr(L"已取消", L"Cancelled"));
-                break;
+            Protection prot;
+            if (encrypting) {
+                // 加密：密码框里可以同时配置防暴力破解
+                if (!CollectEncryptPassword(hWnd, input_path, password, prot, true)) {
+                    SetStatusText(tr(L"已取消", L"Cancelled"));
+                    break;
+                }
+            }
+            else {
+                std::wstring blocked;
+                const PwdCollect r = CollectDecryptPassword(hWnd, input_path, password, blocked);
+                if (r == PwdCollect::Cancelled) {
+                    SetStatusText(tr(L"已取消", L"Cancelled"));
+                    break;
+                }
+                if (r == PwdCollect::Blocked) {
+                    ShowUiMessage(hWnd, UiIcon::Error, tr(L"无法解密", L"Cannot decrypt"),
+                                  input_path + L"\n" + blocked, true);
+                    SetStatusText(tr(L"已拒绝", L"Refused"));
+                    break;
+                }
             }
 
             // 放到后台线程执行，避免界面卡死（不再出现“无响应”）
-            StartProcessing({ input_path }, {}, password);
+            StartProcessing({ input_path }, {}, password, {}, prot);
             break;
         }
 
@@ -1426,10 +1700,84 @@ static std::wstring PasswordSubtitle(const std::wstring& file, size_t index, siz
     return file + L"    (" + std::to_wstring(index + 1) + L"/" + std::to_wstring(total) + L")";
 }
 
+// 加密前收集密码；allowProtection 为真时在密码框里显示防暴力破解设置区。
+// 返回值即 uiProt 的内容，直接写进文件头。
+static bool CollectEncryptPassword(HWND owner, const std::wstring& subtitle,
+                                   std::string& outPwd, Protection& outProt,
+                                   bool allowProtection) {
+    // 默认值：保护关闭；勾选后默认 3 次 / 永久删除 / 锁定 7 天
+    UiProtection ui;
+    ui.enabled = false;
+    ui.maxTries = 3;
+    ui.action = 0;
+    ui.lockDays = 7;
+
+    if (!ShowPasswordDialog(owner, outPwd, true, subtitle, allowProtection, &ui))
+        return false;
+
+    outProt.enabled = ui.enabled;
+    outProt.maxTries = ui.maxTries;
+    outProt.action = (ui.action == 1) ? ProtectionAction::Lock : ProtectionAction::Delete;
+    outProt.lockDays = ui.lockDays;
+    return true;
+}
+
+// 解密前收集密码。受保护文件：
+//   * 锁定期内直接拒绝（即使密码正确）
+//   * 锁定到期则把剩余次数重置为初始值
+//   * 密码错误 -> 扣减 -> 带着新的剩余次数重新弹框，直到用尽或用对
+static PwdCollect CollectDecryptPassword(HWND owner, const std::wstring& file,
+                                         std::string& outPwd, std::wstring& blockedMsg) {
+    FileProtState st;
+    const bool haveState = FileEncryptor::ReadProtState(file, st);
+
+    if (haveState && st.isProtected) {
+        if (st.lockUntil != 0) {
+            const uint64_t now = FileEncryptor::NowUnix();
+            if (now < st.lockUntil) {
+                blockedMsg = tr(L"该文件已被锁定，剩余 ", L"This file is locked for another ")
+                           + FormatDuration(st.lockUntil - now);
+                return PwdCollect::Blocked;
+            }
+            // 锁定已到期：恢复次数并清除锁定时间
+            FileEncryptor::WriteMutableState(file, st.maxTries, 0);
+            st.remaining = st.maxTries;
+            st.lockUntil = 0;
+        }
+
+        for (;;) {
+            std::string pwd;
+            if (!ShowPasswordDialog(owner, pwd, false, file, false, nullptr, st.remaining))
+                return PwdCollect::Cancelled;
+
+            FileProtState cur = st;
+            const ProtVerify vr = FileEncryptor::VerifyPassword(file, pwd, cur);
+            if (vr != ProtVerify::Wrong) {   // Ok 或无法快速校验都交给后续解密判断
+                outPwd = pwd;
+                return PwdCollect::Ok;
+            }
+
+            std::wstring msg;
+            const int left = FileEncryptor::ConsumeAttempt(file, cur, msg);
+            if (left <= 0) {
+                blockedMsg = msg;
+                return PwdCollect::Blocked;
+            }
+            st.remaining = left;   // 带着新的剩余次数重新弹框
+        }
+    }
+
+    if (!ShowPasswordDialog(owner, outPwd, false, file))
+        return PwdCollect::Cancelled;
+    return PwdCollect::Ok;
+}
+
 // 在后台线程中处理文件队列，避免阻塞 UI 线程（消除“无响应”）
 static void StartProcessing(std::vector<std::wstring> files,
                             std::vector<std::string> perFilePasswords,
-                            std::string singlePassword) {
+                            std::string singlePassword,
+                            std::vector<Protection> perFileProts,
+                            Protection singleProt) {
     if (g_workerRunning.exchange(true)) {
         ShowUiMessage(g_mainWnd, UiIcon::Info, tr(L"提示", L"Notice"),
                       tr(L"已有任务正在运行，请稍候。", L"A task is already running; please wait."), false);
@@ -1463,7 +1811,8 @@ static void StartProcessing(std::vector<std::wstring> files,
     ShowProgressBar(true);   // 所有文件都显示进度条（不再按大小判断）
 
     std::thread worker([files, perFilePasswords, singlePassword, english, fileCount,
-                        iterations, deletePasses, keepSource, outMode, fixedDir, completion]() mutable {
+                        iterations, deletePasses, keepSource, outMode, fixedDir, completion,
+                        perFileProts, singleProt]() mutable {
         std::vector<std::wstring> failures;
         size_t processed = 0;
 
@@ -1514,7 +1863,11 @@ static void StartProcessing(std::vector<std::wstring> files,
                     if (!keepSource) SecureDeleteFile(f, 0);
                 }
                 else {
-                    FileEncryptor::encryptFileTo(f, out_path, usePwd, iterations);
+                    // 每个文件可以有自己的防暴力破解策略（批量逐个设置密码时）
+                    Protection prot = singleProt;
+                    if (!perFileProts.empty() && idx < perFileProts.size())
+                        prot = perFileProts[idx];
+                    FileEncryptor::encryptFileTo(f, out_path, usePwd, iterations, prot);
                     // 源文件含明文，按设置覆写 N 次后删除；“禁用”= 保留不删。
                     if (!keepSource) SecureDeleteFile(f, deletePasses);
                 }
@@ -1522,7 +1875,20 @@ static void StartProcessing(std::vector<std::wstring> files,
             }
             catch (const std::exception& e) {
                 const std::wstring werr = narrow_to_wstring(e.what());
-                failures.push_back(f + L"\n" + werr);
+                std::wstring extra;
+
+                // 批量「使用相同密码」时，只有第一个受保护文件在收集阶段校验过；
+                // 其余文件如果实际解密失败（认证失败），就在这里各自扣减次数。
+                // 这是有意的取舍：避免为 N 个文件逐个弹框，同时次数仍然会被记上。
+                if (isEnc && werr.find(L"认证失败") != std::wstring::npos) {
+                    FileProtState pst;
+                    if (FileEncryptor::ReadProtState(f, pst) && pst.isProtected) {
+                        std::wstring msg;
+                        FileEncryptor::ConsumeAttempt(f, pst, msg);
+                        if (!msg.empty()) extra = L"\n" + msg;
+                    }
+                }
+                failures.push_back(f + L"\n" + werr + extra);
             }
         }
 

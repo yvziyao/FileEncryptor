@@ -23,11 +23,28 @@ struct UiMessage {
 // 返回值：IDOK / IDYES / IDNO / IDCANCEL
 int  UiShowMessage(HWND owner, const UiMessage& msg);
 
+// 防暴力破解设置（仅加密时由用户在“设置密码”框中配置）
+struct UiProtection {
+    bool enabled = false;   // 默认关闭：避免用户无意中触发不可逆的删除
+    int  maxTries = 3;      // 允许的错误尝试次数 1..9999
+    int  action = 0;        // 0=永久删除文件 1=限时锁定
+    int  lockDays = 7;      // 限时锁定的天数 0..3650
+};
+
 // 密码输入/设置对话框。成功返回 true 并写出 UTF-8 密码。
 // subtitle 非空时会在标题下方显示（用于批量处理时指明当前是哪个文件），
 // 过长时按路径省略（保留文件名）。
+//
+// confirm==true（加密）时：
+//   showProtection 为真则显示防暴力破解设置区，ioProt 用于回填与读取。
+// confirm==false（解密）时：
+//   remainTries >= 0 会在密码输入框下方用红字显示“还能尝试 X 次”（受保护文件专用）；
+//   传 -1 表示不显示（未启用保护的文件）。
 bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
-                    const std::wstring& subtitle = std::wstring());
+                    const std::wstring& subtitle = std::wstring(),
+                    bool showProtection = false,
+                    UiProtection* ioProt = nullptr,
+                    int remainTries = -1);
 
 // 设置对话框的数据（取值与 app_settings 中的枚举一一对应）
 struct UiSettingsData {
