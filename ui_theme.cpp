@@ -484,9 +484,57 @@ void UiDrawRoundRect(HDC dc, const RECT& rc, int radiusPx,
     rt->Release();
 }
 
+// 进度条高光：一条白色渐变光带，模拟 Windows 复制文件时“从左到右扫过”的效果，
+// 让用户一眼看出进度条没有卡死。
+// 用三段线性渐变（透明 -> 白 -> 透明）填充圆角矩形：渐变范围之外会按端点色
+// 延展，也就是全透明，所以不需要额外裁剪就能只显示出一条光带。
+void UiDrawSheen(HDC dc, const RECT& rc, int radiusPx, float centerX, int halfWidth, BYTE alpha) {
+    if (!dc || alpha == 0) return;
+    const FLOAT w = (FLOAT)(rc.right - rc.left);
+    const FLOAT h = (FLOAT)(rc.bottom - rc.top);
+    if (w <= 0 || h <= 0) return;
+
+    RECT bind = rc;
+    InflateRect(&bind, 1, 1);
+    ID2D1DCRenderTarget* rt = D2DTargetFor(dc, bind);
+    if (!rt) return;
+
+    const FLOAT dx = (FLOAT)(rc.left - bind.left);
+    const FLOAT dy = (FLOAT)(rc.top - bind.top);
+    const FLOAT cx = dx + (centerX - (FLOAT)rc.left);
+    const FLOAT hw = (FLOAT)(halfWidth > 0 ? halfWidth : 1);
+    const FLOAT a = (FLOAT)alpha / 255.0f;
+
+    D2D1_GRADIENT_STOP stops[3];
+    stops[0].position = 0.0f; stops[0].color = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f);
+    stops[1].position = 0.5f; stops[1].color = D2D1::ColorF(1.0f, 1.0f, 1.0f, a);
+    stops[2].position = 1.0f; stops[2].color = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f);
+
+    ID2D1GradientStopCollection* coll = nullptr;
+    if (FAILED(rt->CreateGradientStopCollection(stops, 3, &coll)) || !coll) {
+        rt->Release();
+        return;
+    }
+
+    ID2D1LinearGradientBrush* brush = nullptr;
+    if (SUCCEEDED(rt->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(
+                D2D1::Point2F(cx - hw, 0.0f), D2D1::Point2F(cx + hw, 0.0f)),
+            coll, &brush)) && brush) {
+        const FLOAT radius = (FLOAT)(radiusPx > 0 ? radiusPx : 1);
+        D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+            D2D1::RectF(dx, dy, dx + w, dy + h), radius, radius);
+        rt->BeginDraw();
+        rt->FillRoundedRectangle(rr, brush);
+        rt->EndDraw();
+        brush->Release();
+    }
+    coll->Release();
+    rt->Release();
+}
+
 void UiDrawTextLine(HDC dc, const std::wstring& text, const RECT& rc,
-                    HFONT font, COLORREF color, UINT flags) {
-    if (!dc || text.empty()) return;
+                    HFONT font, COLORREF color, UINT flags) {    if (!dc || text.empty()) return;
     HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
     const int oldMode = SetBkMode(dc, TRANSPARENT);
     const COLORREF oldColor = SetTextColor(dc, color);

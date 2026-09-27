@@ -8,6 +8,7 @@
 
 #include <windows.h>
 #include <string>
+#include <vector>
 
 enum class UiIcon { None, Info, Warning, Error, Question };
 
@@ -15,13 +16,21 @@ struct UiMessage {
     std::wstring caption;
     std::wstring text;
     UiIcon       icon = UiIcon::Info;
-    UINT         buttons = MB_OK;   // MB_OK / MB_OKCANCEL / MB_YESNO
+    UINT         buttons = MB_OK;   // MB_OK / MB_OKCANCEL / MB_YESNO / MB_YESNOCANCEL
     bool         topmost = false;   // 强制置顶，避免被其他窗口覆盖
     bool         sound = true;      // 显示时播放系统提示音
+    // 可选：自定义按钮文字（按按钮顺序一一对应；空串表示用默认措辞）
+    std::vector<std::wstring> labels;
+    // 可选：指定哪个按钮画成蓝色主按钮；0 = 用默认规则
+    int          primaryId = 0;
 };
 
 // 返回值：IDOK / IDYES / IDNO / IDCANCEL
 int  UiShowMessage(HWND owner, const UiMessage& msg);
+
+// 当前打开的模态对话框层数（0 = 没有弹窗）。主窗口隐藏到后台后，
+// 用它避免在弹窗还开着的时候就把自己销毁掉。
+int  UiModalDepth();
 
 // 防暴力破解设置（仅加密时由用户在“设置密码”框中配置）
 struct UiProtection {

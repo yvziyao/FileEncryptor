@@ -1,4 +1,4 @@
-#define OPENSSL_API_COMPAT 0x10100000L
+﻿#define OPENSSL_API_COMPAT 0x10100000L
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <windows.h>
@@ -29,6 +29,7 @@
 // 圆角/主题绘制统一由 ui_theme 提供（基于 Direct2D），此处不再单独持有 D2D/DWrite 资源
 #include <thread>
 #include <atomic>
+#include <functional>
 
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "User32.lib")
@@ -49,8 +50,19 @@ HWND g_hBtn2 = NULL;
 HWND g_hLangBtn = NULL; // 语言切换按钮
 bool g_hoverBtn[8] = {};      // 下标 = 控件 ID，鼠标是否悬停在该按钮上
 bool g_trackingMouse = false;
-HWND g_progressBar = NULL;
+// 进度条改为自绘（标准 PROGRESS 控件做不出“绿色 + 白色扫光”的效果）
+static bool      g_progVisible = false;
+static ULONGLONG g_progStartTick = 0;   // 本次进度开始时刻，用于估算剩余时间
+static float     g_sheenX = 0.0f;       // 高光当前位置（相对进度条宽度的比例 0..1）
+static double    g_progShown = 0.0;     // 进度条当前显示值 0..100
+static double    g_progTarget = 0.0;    // 进度条目标值 0..100
+// 剩余时间文案做节流：数字本身在抖动，每半秒才更新一次
+static std::wstring g_etaText;
+static ULONGLONG    g_etaLastTick = 0;
 std::atomic<bool> g_workerRunning(false);
+// 关闭时选择了“后台运行”：窗口隐藏继续处理，任务结束后自动退出
+static bool g_runInBackground = false;
+static bool g_pendingBackgroundExit = false;   // 后台任务已结束，等弹窗关掉再退出
 // 主窗口句柄
 HWND g_mainWnd = NULL;
 
@@ -67,6 +79,9 @@ std::wstring g_statusText;
 #define WM_APP_UPDATE_PROGRESS (WM_APP + 3)
 #define WM_APP_SHOW_MESSAGE  (WM_APP + 4)
 #define WM_APP_ASK_OUTPUT_PATH (WM_APP + 5)
+#define WM_APP_BACKGROUND_DONE (WM_APP + 6)   // “后台运行”的任务已结束，可以退出
+#define WM_APP_TRAY            (WM_APP + 7)   // 托盘图标回调
+#define TIMER_BG_EXIT          2              // 等弹窗关闭后再退出后台进程
 
 // “每次都询问”输出位置时，工作线程请求 UI 线程弹一次保存对话框
 struct AskOutputPath {
@@ -91,7 +106,58 @@ static void ProgressAdd(uint64_t bytes);
 static void ProgressEndFile();
 static void ProgressFinish();
 static void CollectFilesRecursive(const std::wstring& path, std::vector<std::wstring>& out);
-static void SecureDeleteFile(const std::wstring& wPath, int passes);
+// ---------- 系统托盘 ----------
+// 窗口隐藏到后台时用户完全看不到任务状态，所以放一个托盘图标：
+// 悬停显示当前进度，左键恢复窗口，右键可显示/退出。
+#define TRAY_ICON_ID 1
+static bool g_trayAdded = false;
+
+static void TraySetTip(const std::wstring& tip) {
+    if (!g_trayAdded || !g_mainWnd) return;
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_mainWnd;
+    nid.uID = TRAY_ICON_ID;
+    nid.uFlags = NIF_TIP;
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+static void TrayAdd() {
+    if (g_trayAdded || !g_mainWnd) return;
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_mainWnd;
+    nid.uID = TRAY_ICON_ID;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_APP_TRAY;
+    nid.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APPICON));
+    wcsncpy_s(nid.szTip, tr(L"文件加密工具 — 正在后台处理…",
+                            L"File Encryptor - running in background...").c_str(), _TRUNCATE);
+    if (Shell_NotifyIconW(NIM_ADD, &nid)) g_trayAdded = true;
+}
+
+static void TrayRemove() {
+    if (!g_trayAdded || !g_mainWnd) return;
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_mainWnd;
+    nid.uID = TRAY_ICON_ID;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    g_trayAdded = false;
+}
+
+// 从托盘恢复窗口（恢复后不再自动退出）
+static void RestoreFromTray(HWND hWnd) {
+    g_runInBackground = false;
+    TrayRemove();
+    ShowWindow(hWnd, SW_SHOW);
+    ShowWindow(hWnd, SW_RESTORE);
+    SetForegroundWindow(hWnd);
+    InvalidateRect(hWnd, NULL, FALSE);
+}
+static void SecureDeleteFile(const std::wstring& wPath, int passes,
+                             const std::function<void(uint64_t)>& onProgress = {});
 
 // 防暴力破解策略：加密时写入文件头，由解密方读取并执行
 // （定义放在这里，因为下面几个前置声明要用到）
@@ -646,7 +712,8 @@ void FileEncryptor::DecryptImpl(const std::wstring& input_path, const std::wstri
 }
 
 // 安全删除：passes 为覆写次数（0 = 直接删除）
-static void SecureDeleteFile(const std::wstring& wPath, int passes) {
+static void SecureDeleteFile(const std::wstring& wPath, int passes,
+                             const std::function<void(uint64_t)>& onProgress) {
     if (passes <= 0) {
         DeleteFileW(wPath.c_str());
         return;
@@ -673,6 +740,7 @@ static void SecureDeleteFile(const std::wstring& wPath, int passes) {
                         DWORD written = 0;
                         WriteFile(hFile, buf.data(), (DWORD)toWrite, &written, NULL);
                         remaining -= written;
+                        if (onProgress && written) onProgress((uint64_t)written);
                     }
                     FlushFileBuffers(hFile);
                 }
@@ -794,12 +862,7 @@ static void ShowProgressBar(bool show) {
         PostMessageW(g_mainWnd, WM_APP_SHOW_PROGRESS, show ? 1 : 0, 0);
     }
     else {
-        if (!g_progressBar) return;
-        ShowWindow(g_progressBar, show ? SW_SHOW : SW_HIDE);
-        if (show) {
-            SendMessageW(g_progressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-            SendMessageW(g_progressBar, PBM_SETPOS, 0, 0);
-        }
+        g_progVisible = show;
     }
 }
 
@@ -812,8 +875,7 @@ static void SetProgressFraction(double overall) {
         PostMessageW(g_mainWnd, WM_APP_UPDATE_PROGRESS, (WPARAM)pos, 0);
     }
     else {
-        if (!g_progressBar) return;
-        SendMessageW(g_progressBar, PBM_SETPOS, pos, 0);
+        g_progTarget = (double)pos;
     }
 }
 
@@ -880,8 +942,6 @@ static ULONGLONG g_animLastTick = 0;
 static float     g_btnHover[8] = {};          // 下标 = 控件 ID，0..1 悬停渐变
 static int       g_winHFrom = 0, g_winHTo = 0;
 static float     g_winHT = 1.0f;              // 高度过渡进度 0..1
-static double    g_progShown = 0.0;           // 进度条当前显示值 0..100
-static double    g_progTarget = 0.0;          // 进度条目标值 0..100
 
 static void StartAnimation();
 
@@ -944,16 +1004,40 @@ static int MainClientWidth() {
 // 顶部第一行留给右上角的设置按钮，主按钮放在它下方，两者不重叠
 static const int kMainBtnY = 46;    // 96dpi 设计值
 
+// 进度条的绘制位置（主窗口客户区坐标）；WM_PAINT 与布局共用，避免两处算不一致
+static int ProgressRectTop() { return UiPx(kMainBtnY) + UiPx(44) + UiPx(16); }
+
 static int MainClientHeight(bool busy) {
     const int btnY = UiPx(kMainBtnY);
     const int btnH = UiPx(44);
     const int statusH = UiPx(28);
     if (!busy) return btnY + btnH + UiPx(20) + statusH;
 
-    // 工作中只需要多让出进度条的位置（已无取消按钮）
-    const int progY = btnY + btnH + UiPx(18);
-    const int progH = UiPx(14);
-    return progY + progH + UiPx(20) + statusH;
+    // 工作中：进度条 + 下方一行“进度 / 预计剩余时间”（已无取消按钮）
+    return ProgressRectTop() + UiPx(18) + UiPx(6) + UiPx(18) + UiPx(16) + statusH;
+}
+
+static void ProgressRects(const RECT& rc, RECT& bar, RECT& info) {
+    const int pad = UiPx(24);
+    const int top = ProgressRectTop();
+    bar = { pad, top, rc.right - pad, top + UiPx(18) };
+    info = { pad, bar.bottom + UiPx(6), rc.right - pad, bar.bottom + UiPx(6) + UiPx(18) };
+}
+
+// 进度条填充色：浅色主题用 Windows 那种较深的绿，深色主题用亮一点的绿
+static COLORREF ProgressGreen() {
+    return UiIsDark() ? RGB(0x6C, 0xCB, 0x5E) : RGB(0x10, 0x7C, 0x10);
+}
+
+// 剩余时间文案
+static std::wstring FormatEta(double seconds) {
+    if (seconds < 1.0) return tr(L"不到 1 秒", L"<1s");
+    const int s = (int)(seconds + 0.5);
+    if (s < 60) return std::to_wstring(s) + tr(L" 秒", L"s");
+    const int m = s / 60;
+    const int r = s % 60;
+    if (m < 60) return std::to_wstring(m) + tr(L" 分 ", L"m ") + std::to_wstring(r) + tr(L" 秒", L"s");
+    return std::to_wstring(m / 60) + tr(L" 小时 ", L"h ") + std::to_wstring(m % 60) + tr(L" 分", L"m");
 }
 
 static void SetBusyLayout(bool busy) {
@@ -1052,20 +1136,41 @@ static void TickAnimation(HWND hWnd) {
         }
     }
 
-    // 3) 进度条数值平滑（约 150ms 追上目标）
-    if (g_progressBar) {
+    // 3) 进度条数值平滑（约 150ms 追上目标）+ 高光扫动
+    if (g_progVisible) {
         const double diff = g_progTarget - g_progShown;
         if (diff > 0.25 || diff < -0.25) {
             double k = dt / 0.15;
             if (k > 1.0) k = 1.0;
             g_progShown += diff * k;
-            SendMessageW(g_progressBar, PBM_SETPOS, (int)(g_progShown + 0.5), 0);
             active = true;
         }
         else if (g_progShown != g_progTarget) {
             g_progShown = g_progTarget;
-            SendMessageW(g_progressBar, PBM_SETPOS, (int)(g_progShown + 0.5), 0);
         }
+        // 高光持续从左到右扫过（每轮约 1.1 秒），即使进度长时间不动也看得出没卡死
+        g_sheenX += dt / 1.1f;
+        if (g_sheenX > 1.35f) g_sheenX = -0.35f;
+
+        // 剩余时间每 0.5 秒才算一次：逐帧计算会因读写速率波动而快速往复跳变
+        const ULONGLONG nowTick = GetTickCount64();
+        if (nowTick - g_etaLastTick >= 500) {
+            g_etaLastTick = nowTick;
+            const double frac = g_progShown / 100.0;
+            const ULONGLONG elapsed = nowTick - g_progStartTick;
+            g_etaText.clear();
+            if (g_trayAdded) {
+                TraySetTip(tr(L"文件加密工具 — 后台处理中 ", L"File Encryptor - background ")
+                           + std::to_wstring((int)(g_progShown + 0.5)) + L"%");
+            }
+            if (frac > 0.02 && elapsed > 800) {
+                const double eta = (double)elapsed / 1000.0 * (1.0 - frac) / frac;
+                g_etaText = tr(L" · 预计剩余 ", L" · about ") + FormatEta(eta) + tr(L"", L" left");
+            }
+        }
+
+        active = true;
+        InvalidateRect(hWnd, NULL, FALSE);
     }
 
     if (!active) {
@@ -1103,15 +1208,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_hLangBtn) SendMessageW(g_hLangBtn, WM_SETFONT, (WPARAM)uiFont, TRUE);
         }
 
-        // 创建进度条（默认隐藏）。关闭视觉样式后 PBM_SETBKCOLOR/PBM_SETBARCOLOR
-        // 才会生效，从而让进度条跟随深/浅色主题。
-        g_progressBar = CreateWindowExW(0, PROGRESS_CLASS, NULL, WS_CHILD | PBS_SMOOTH, 20, 110, 340, 16, hWnd, (HMENU)3, GetModuleHandle(NULL), NULL);
-        if (g_progressBar) {
-            UiDetheme(g_progressBar);
-            SendMessageW(g_progressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-            ApplyProgressBarTheme();
-            ShowWindow(g_progressBar, SW_HIDE);
-        }
+        // 进度条不创建子控件：在 WM_PAINT 里自绘（绿色填充 + 白色扫光 + 下方进度/剩余时间）
 
         // 接受文件拖拽
         DragAcceptFiles(hWnd, TRUE);
@@ -1400,11 +1497,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_hBtn2) SetWindowPos(g_hBtn2, NULL, btnX + btnW + btnGap, btnY, btnW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
 
         const int pad = UiPx(24);
-        const int progY = btnY + btnH + UiPx(20);
-        const int progH = UiPx(14);
-        if (g_progressBar) {
-            SetWindowPos(g_progressBar, NULL, pad, progY, W - pad * 2, progH, SWP_NOZORDER | SWP_NOACTIVATE);
-        }
+        (void)pad;
 
         if (g_hLangBtn) {
             SetWindowPos(g_hLangBtn, NULL, W - UiPx(52), UiPx(10), UiPx(40), UiPx(28), SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1441,6 +1534,38 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             RECT textRc = { UiPx(12), statusRc.top, rc.right - UiPx(12), statusRc.bottom };
             UiDrawTextLine(dc, g_statusText, textRc, UiFont(UiPx(13), false), c.textMuted,
                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            // 自绘进度条：绿色填充 + 白色扫光 + 下方进度/预计剩余时间
+            if (g_progVisible) {
+                RECT bar = {}, info = {};
+                ProgressRects(rc, bar, info);
+                // 顶点带一点点圆角即可，不要做成两端半圆
+                const int radius = UiPx(3);
+
+                UiDrawRoundRect(dc, bar, radius, true, c.track, true, c.border);
+
+                const double f = g_progShown / 100.0;
+                if (f > 0.0001) {
+                    RECT fill = bar;
+                    fill.right = bar.left + (int)((bar.right - bar.left) * f + 0.5);
+                    // 圆角矩形的宽度不能小于两倍圆角，否则两端会被压扁
+                    if (fill.right < fill.left + radius * 2) fill.right = fill.left + radius * 2;
+                    if (fill.right > bar.right) fill.right = bar.right;
+                    UiDrawRoundRect(dc, fill, radius, true, ProgressGreen(), false, ProgressGreen());
+
+                    // 高光只在绿色（已完成）部分内扫动，不跨到空白轨道上
+                    const int fillW = fill.right - fill.left;
+                    const int halfW = fillW / 4 > UiPx(30) ? fillW / 4 : UiPx(30);
+                    UiDrawSheen(dc, fill, radius,
+                                (float)fill.left + g_sheenX * (float)fillW, halfW, 90);
+                }
+
+                // 下方文字：45% · 预计剩余 12 秒（覆写阶段则显示当前阶段）
+                std::wstring line = std::to_wstring((int)(g_progShown + 0.5)) + L"%";
+                line += g_etaText;   // 始终只显示预计时间（覆写阶段同样按总工作量推算）
+                UiDrawTextLine(dc, line, info, UiFont(UiPx(13), false), c.textMuted,
+                               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
         }
 
         EndPaint(hWnd, &ps);
@@ -1542,7 +1667,85 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     }
 
+    case WM_CLOSE: {
+        // 防误触：有任务在跑时先确认，避免手滑关掉正在处理的文件
+        if (g_workerRunning && !g_runInBackground) {
+            UiMessage m;
+            m.caption = tr(L"任务尚未结束", L"Task still running");
+            m.text = tr(
+                L"当前还有加/解密任务正在执行。\n\n"
+                L"「强制关闭」：立即关闭，可能留下未完成的输出文件\n"
+                L"「后台运行」：转入后台继续处理，完成后自动退出\n"
+                L"「取消」：返回程序，继续等待任务完成",
+                L"A file encryption/decryption task is still running.\n\n"
+                L"Force close: close now (may leave an incomplete output file)\n"
+                L"Run in background: keep processing, exit automatically when finished\n"
+                L"Cancel: go back and wait for the task to finish");
+            m.icon = UiIcon::Warning;
+            m.buttons = MB_YESNOCANCEL;
+            // 左 -> 右：强制关闭 / 后台运行 / 取消。
+            // 蓝色主按钮放在“取消”上——破坏性操作不该是默认高亮的那一个，否则仍然容易误触。
+            m.labels = { tr(L"强制关闭", L"Force close"),
+                         tr(L"后台运行", L"Run in background"),
+                         tr(L"取消", L"Cancel") };
+            m.primaryId = IDCANCEL;
+            m.topmost = true;
+            m.sound = true;
+            const int r = UiShowMessage(hWnd, m);
+            if (r == IDYES) {
+                // 强制关闭：直接销毁窗口，进程退出时工作线程一并结束
+                DestroyWindow(hWnd);
+            }
+            else if (r == IDNO) {
+                g_runInBackground = true;
+                ShowWindow(hWnd, SW_HIDE);
+                TrayAdd();   // 后台运行：托盘上留个入口，并能看到进度
+            }
+            return 0;   // 取消（或处理完毕）都不再继续默认关闭流程
+        }
+        // 没有任务在跑：必须显式 DestroyWindow。
+        // 不能靠 break 落到 DefWindowProc——本 WndProc 的兜底是 return 0，
+        // 窗口不会被销毁，结果就是程序关不掉。
+        DestroyWindow(hWnd);
+        return 0;
+    }
+
+    case WM_APP_BACKGROUND_DONE:
+        // 后台任务结束。若此时完成提示弹窗还开着，不能立刻销毁主窗口：
+        // 弹窗的模态循环会继续派发消息，提前销毁会把弹窗一起带走，用户根本来不及看。
+        if (UiModalDepth() > 0) {
+            g_pendingBackgroundExit = true;
+            SetTimer(hWnd, TIMER_BG_EXIT, 200, NULL);
+        }
+        else {
+            TrayRemove();
+            DestroyWindow(hWnd);
+        }
+        return 0;
+
+    case WM_APP_TRAY: {
+        const UINT ev = (UINT)lParam;
+        if (ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK) {
+            RestoreFromTray(hWnd);
+        }
+        else if (ev == WM_RBUTTONUP) {
+            HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, 1, tr(L"显示主窗口", L"Show window").c_str());
+            AppendMenuW(menu, MF_STRING, 2, tr(L"退出", L"Exit").c_str());
+            POINT pt = {};
+            GetCursorPos(&pt);
+            SetForegroundWindow(hWnd);
+            const int cmd = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                                pt.x, pt.y, 0, hWnd, NULL);
+            DestroyMenu(menu);
+            if (cmd == 1) RestoreFromTray(hWnd);
+            else if (cmd == 2) { TrayRemove(); DestroyWindow(hWnd); }
+        }
+        return 0;
+    }
+
     case WM_DESTROY:
+        TrayRemove();
         UiThemeShutdown();
         PostQuitMessage(0);
         break;
@@ -1567,25 +1770,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const BOOL show = (wParam != 0);
         // 空闲时窗口是紧凑的；开始/结束任务时在两种高度之间过渡，避免留下大片空白
         SetBusyLayout(show != 0);
-        if (g_progressBar) {
-            if (show) {
-                g_progShown = 0.0;
-                g_progTarget = 0.0;
-                SendMessageW(g_progressBar, PBM_SETPOS, 0, 0);
-                ShowWindow(g_progressBar, SW_SHOW);
-            }
-            else {
-                // 收尾：直接对齐到目标值，避免进度条停在半路
-                g_progShown = g_progTarget;
-                ShowWindow(g_progressBar, SW_HIDE);
-            }
+        if (show) {
+            g_progShown = 0.0;
+            g_progTarget = 0.0;
+            g_sheenX = -0.35f;
+            g_progStartTick = GetTickCount64();   // 用于估算剩余时间
+            g_etaLastTick = 0;
+            g_etaText.clear();
+            g_progVisible = true;
         }
+        else {
+            // 收尾：直接对齐到目标值，避免进度条停在半路
+            g_progShown = g_progTarget;
+            g_progVisible = false;
+        }
+        StartAnimation();
         break;
     }
     case WM_APP_UPDATE_PROGRESS: {
         // 只更新目标值；实际显示由动画定时器平滑逼近
         g_progTarget = (double)(int)wParam;
-        if (g_progressBar) StartAnimation();
+        StartAnimation();
         break;
     }
 
@@ -1593,6 +1798,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return HandleAskOutputPath(hWnd, lParam);
 
     case WM_TIMER: {
+        if (wParam == TIMER_BG_EXIT) {
+            if (UiModalDepth() == 0) {   // 弹窗已关，可以退出了
+                KillTimer(hWnd, TIMER_BG_EXIT);
+                TrayRemove();
+                DestroyWindow(hWnd);
+            }
+            return 0;
+        }
         if (wParam == ANIM_TIMER_ID) {
             TickAnimation(hWnd);
             return 0;
@@ -1606,13 +1819,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
-// 进度条配色（关闭视觉样式后 PBM_SETBKCOLOR / PBM_SETBARCOLOR 才会生效）
-static void ApplyProgressBarTheme() {
-    if (!g_progressBar) return;
-    const UiPalette& c = UiColors();
-    SendMessageW(g_progressBar, PBM_SETBKCOLOR, 0, (LPARAM)c.track);
-    SendMessageW(g_progressBar, PBM_SETBARCOLOR, 0, (LPARAM)c.accent);
-}
+// 进度条已自绘，配色随主题自动生效，这里保留空实现以兼容调用点
+static void ApplyProgressBarTheme() {}
 
 // 统一的消息提示入口：WinUI 3 风格 + 全局语言 + 提示音
 static void ShowUiMessage(HWND owner, UiIcon icon, const std::wstring& caption,
@@ -1795,14 +2003,22 @@ static void StartProcessing(std::vector<std::wstring> files,
     const bool english = g_langEnglish;
     const size_t fileCount = files.size();
 
-    // 统计所有输入文件的总字节数，用于跨文件的整体进度
+    // 统计所有输入文件的总字节数，用于跨文件的整体进度。
+    // 加密后如果还要覆写删除源文件，那部分耗时同样计入总工作量——
+    // 否则大文件会在进度条到 100% 后长时间“卡住”（其实是在覆写）。
+    const bool encryptingTask = !(files.empty() ||
+        (files[0].size() >= 4 && files[0].substr(files[0].size() - 4) == L".enc"));
+    const uint64_t deleteMultiplier =
+        (encryptingTask && !keepSource && deletePasses > 0) ? (uint64_t)deletePasses : 0;
+
     uint64_t totalBytes = 0;
     for (const auto& f : files) {
         HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             LARGE_INTEGER li = {};
-            if (GetFileSizeEx(h, &li) && li.QuadPart > 0) totalBytes += (uint64_t)li.QuadPart;
+            if (GetFileSizeEx(h, &li) && li.QuadPart > 0)
+                totalBytes += (uint64_t)li.QuadPart * (1 + deleteMultiplier);
             CloseHandle(h);
         }
     }
@@ -1855,6 +2071,18 @@ static void StartProcessing(std::vector<std::wstring> files,
             const std::wstring out_path = ResolveOutputPath(f, !isEnc, outMode, fixedDir, skipped);
             if (skipped) continue;   // 用户取消了这一个文件的保存对话框
 
+            // 当前文件的原始大小：用于把覆写删除的工作量也计入进度
+            uint64_t fileBytes = 0;
+            {
+                HANDLE hs = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hs != INVALID_HANDLE_VALUE) {
+                    LARGE_INTEGER li = {};
+                    if (GetFileSizeEx(hs, &li) && li.QuadPart > 0) fileBytes = (uint64_t)li.QuadPart;
+                    CloseHandle(hs);
+                }
+            }
+
             try {
                 if (isEnc) {
                     FileEncryptor::decryptFileTo(f, out_path, usePwd);
@@ -1869,7 +2097,18 @@ static void StartProcessing(std::vector<std::wstring> files,
                         prot = perFileProts[idx];
                     FileEncryptor::encryptFileTo(f, out_path, usePwd, iterations, prot);
                     // 源文件含明文，按设置覆写 N 次后删除；“禁用”= 保留不删。
-                    if (!keepSource) SecureDeleteFile(f, deletePasses);
+                    // 覆写大文件很耗时，必须上报进度并切换阶段文案，
+                    // 否则进度条会一直停在 100% 让人以为卡死。
+                    if (!keepSource) {
+                        if (deletePasses > 0) {
+                            ProgressBeginFile(fileBytes * (uint64_t)deletePasses);
+                            SecureDeleteFile(f, deletePasses, [](uint64_t n) { ProgressAdd(n); });
+                            ProgressEndFile();
+                                        }
+                        else {
+                            SecureDeleteFile(f, 0);
+                        }
+                    }
                 }
                 ++processed;
             }
@@ -1945,6 +2184,11 @@ static void StartProcessing(std::vector<std::wstring> files,
         }
 
         g_workerRunning = false;
+
+        // 用户之前选择“后台运行”：任务结束后自动退出（进度条已关闭，这里再关窗口）
+        if (g_runInBackground && g_mainWnd) {
+            PostMessageW(g_mainWnd, WM_APP_BACKGROUND_DONE, 0, 0);
+        }
     });
     worker.detach();
 }

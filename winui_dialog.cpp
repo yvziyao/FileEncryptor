@@ -1,4 +1,4 @@
-// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
+﻿// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
 //
 // 结构：
 //   UiDlgState        一次模态会话的全部状态（栈上分配，窗口销毁后返回）
@@ -62,6 +62,8 @@ std::wstring ButtonLabel(int id) {
     default:       return std::wstring();
     }
 }
+
+
 
 // 单行 EDIT 的文字是**顶部对齐**的：控件比文字高多少，就全堆在下面。
 // 所以输入框的可见“白框”与真实 EDIT 控件要分开：
@@ -180,8 +182,13 @@ int MeasureLineWidth(HDC dc, HFONT font, const std::wstring& s) {
 // ---------------------------------------------------------------- 状态
 
 // 对话框动画：入场淡入 + 按钮悬停渐变，共用一个 15ms 定时器
+static int g_modalDepth = 0;   // 当前打开的模态对话框层数
 #define DLG_ANIM_TIMER 1
 #define DLG_ANIM_MS    15
+// 选中底色滑动：固定时长，与跨几个选项无关（缓动曲线用 UiEaseOutCubic）
+#define UI_SLIDE_DURATION 0.18f
+// 关闭淡出时长（秒）
+#define UI_CLOSE_FADE     0.12f
 
 struct BtnExtra { bool hover = false; float anim = 0.0f; };
 
@@ -204,6 +211,9 @@ struct UiDlgState {
     std::vector<HWND> btns;        // 与 btnIds / btnWidths 同序（左 -> 右）
     std::vector<int>  btnIds;
     std::vector<int>  btnWidths;
+    // 自定义按钮文字（可选）：按 btnIds 的顺序一一对应。
+    // 用于“强制关闭 / 后台运行 / 取消”这类不能靠 ID 推断措辞的对话框。
+    std::vector<std::wstring> btnLabels;
     std::vector<HWND> tabOrder;
     int               primaryId = IDOK;
     int               cancelId = IDCANCEL;
@@ -212,6 +222,7 @@ struct UiDlgState {
     int          result = 0;
     bool         done = false;
     bool         showPwd = false;
+    HWND         focusedEdit = nullptr;   // 当前获得焦点的输入框，用于画蓝色聚焦边框
     std::wstring password;
     std::wstring error;
     int          strengthLevel = 0;   // 0=未输入 1=很弱 2=一般 3=良好 4=很强
@@ -249,6 +260,10 @@ struct UiDlgState {
     bool        layered = false;      // 淡入期间临时使用分层窗口
     float       fadeAlpha = 0.0f;
     ULONGLONG   lastAnimTick = 0;
+    // 关闭淡出：出现有动画，关闭也要有
+    bool        closing = false;
+    int         closeResult = IDCANCEL;
+    float       closeAlpha = 0.0f;
 
     // ---- 设置对话框 ----
     struct SegRow {
@@ -256,6 +271,12 @@ struct UiDlgState {
         std::vector<std::wstring> options;
         int                       selected = 0;
         float                     animSel = 0.0f;   // 动画中的选中位置（0..n-1）
+        // 固定时长的缓动：起点 + 目标 + 起始时刻。
+        // 不能用“每帧固定步长”，否则距离越远耗时越长（快速->极强会是快速->标准的 3 倍）。
+        float                     animFrom = 0.0f;
+        float                     animTo = 0.0f;
+        ULONGLONG                 animStart = 0;
+        bool                      animActive = false;
         int                       key = 0;      // 0=语言 1=主题 2=输出位置 3=安全删除 4=完成后 5=加密强度
         RECT                      labelRc{};
         RECT                      segRc{};
@@ -269,7 +290,25 @@ struct UiDlgState {
     bool                     hintVisible = false;
 };
 
+// 取某个按钮的显示文字：优先用对话框自带的自定义文字（按 btnIds 顺序一一对应），
+// 否则回退到按 ID 推断的默认措辞
+std::wstring LabelFor(const UiDlgState* st, size_t index, int id) {
+    if (st && index < st->btnLabels.size() && !st->btnLabels[index].empty())
+        return st->btnLabels[index];
+    return ButtonLabel(id);
+}
+std::wstring LabelForId(const UiDlgState* st, int id) {
+    if (st) {
+        for (size_t i = 0; i < st->btnIds.size(); ++i)
+            if (st->btnIds[i] == id) return LabelFor(st, i, id);
+    }
+    return ButtonLabel(id);
+}
+
 void EnsureDlgAnimation(HWND hDlg);
+UiDlgState* StateOf(HWND hDlg);
+void BeginCloseDialog(HWND hDlg, UiDlgState* st, int result);
+void StartRowSlide(UiDlgState::SegRow& row, int newSel);
 void PositionButtons(UiDlgState* st);
 void RelayoutDialog(HWND hDlg, UiDlgState* st);
 void ApplySettingsRowChange(HWND hDlg, UiDlgState* st, int key);
@@ -359,7 +398,7 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {
         int totalBtnW = 0;
         for (size_t i = 0; i < st->btnIds.size(); ++i) {
             int tw = 0, th = 0;
-            MeasureText(dc, fBody, ButtonLabel(st->btnIds[i]), UiPx(240), true, &tw, &th);
+            MeasureText(dc, fBody, LabelFor(st, i, st->btnIds[i]), UiPx(240), true, &tw, &th);
             const int bw = MaxI(tw + UiPx(36), UiPx(96));
             st->btnWidths[i] = bw;
             totalBtnW += bw;
@@ -456,7 +495,7 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
     int totalBtnW = 0;
     for (size_t i = 0; i < st->btnIds.size(); ++i) {
         int tw = 0, th = 0;
-        MeasureText(dc, fBody, ButtonLabel(st->btnIds[i]), UiPx(240), true, &tw, &th);
+        MeasureText(dc, fBody, LabelFor(st, i, st->btnIds[i]), UiPx(240), true, &tw, &th);
         int bw = MaxI(tw + UiPx(36), UiPx(96));
         st->btnWidths[i] = bw;
         totalBtnW += bw;
@@ -615,7 +654,11 @@ void DrawOwnerButton(LPDRAWITEMSTRUCT pdis) {
     HDC dc = buffer.Dc();
     const bool pressed = (pdis->itemState & ODS_SELECTED) != 0;
     const bool disabled = (pdis->itemState & ODS_DISABLED) != 0;
-    const bool primary = (pdis->CtlID == IDOK || pdis->CtlID == IDYES);
+    const UiDlgState* dlgSt = StateOf(GetParent(pdis->hwndItem));
+    // 蓝色主按钮：优先用对话框指定的，默认仍按 ID 推断
+    const bool primary = (dlgSt && dlgSt->primaryId)
+        ? (pdis->CtlID == dlgSt->primaryId)
+        : (pdis->CtlID == IDOK || pdis->CtlID == IDYES);
     const float hover = ButtonAnimValue(pdis->hwndItem);
 
     COLORREF fill, textColor, borderColor;
@@ -639,7 +682,7 @@ void DrawOwnerButton(LPDRAWITEMSTRUCT pdis) {
     UiFillRect(dc, rc, c.bg);
     UiDrawRoundRect(dc, rc, UiPx(5), true, fill, true, borderColor);
 
-    const std::wstring label = ButtonLabel(pdis->CtlID);
+    const std::wstring label = LabelForId(StateOf(GetParent(pdis->hwndItem)), pdis->CtlID);
     RECT textRc = rc;
     // 强调色按钮用灰度抗锯齿，避免 ClearType 在饱和底色上产生彩边
     UiDrawTextLine(dc, label, textRc, UiFont(UiPx(14), false, primary), textColor,
@@ -786,14 +829,17 @@ void PaintNormalDialog(HDC dc, UiDlgState* st, const RECT& rcClient) {
 
     if (st->isPassword) {
         const COLORREF wellBorder = st->error.empty() ? c.border : c.danger;
-        auto drawWell = [&](const RECT& r, bool visible) {
+        // 获得焦点的输入框用强调色描边，让用户一眼看出光标在哪个框里
+        auto drawWell = [&](const RECT& r, bool visible, HWND edit) {
             if (!visible) return;
             RECT w = r;
             InflateRect(&w, UiPx(1), UiPx(1));
-            UiDrawRoundRect(dc, w, UiPx(5), true, c.bgAlt, true, wellBorder);
+            const bool focused = (edit != nullptr && st->focusedEdit == edit);
+            UiDrawRoundRect(dc, w, UiPx(5), true, c.bgAlt, true,
+                            focused ? c.accent : wellBorder);
         };
-        drawWell(st->rEdit1, st->edit1 != nullptr);
-        drawWell(st->rEdit2, st->edit2 != nullptr && IsWindowVisible(st->edit2));
+        drawWell(st->rEdit1, st->edit1 != nullptr, st->edit1);
+        drawWell(st->rEdit2, st->edit2 != nullptr && IsWindowVisible(st->edit2), st->edit2);
 
         RECT l1 = st->rLabel1;
         UiDrawTextLine(dc, tr(L"密码:", L"Password:"), l1, fBody, c.textMuted,
@@ -853,6 +899,17 @@ void PaintNormalDialog(HDC dc, UiDlgState* st, const RECT& rcClient) {
                 UiDrawTextLine(dc, tr(L"天", L"days"), dr, fBody, labelColor,
                                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
+
+            // 数字输入框的聚焦边框：EDIT 是子窗口、父窗口画不到它内部，
+            // 所以向外扩 2px 画一圈强调色描边
+            auto focusRing = [&](const RECT& r, HWND edit) {
+                if (edit == nullptr || st->focusedEdit != edit) return;
+                RECT fr = r;
+                InflateRect(&fr, UiPx(2), UiPx(2));
+                UiDrawRoundRect(dc, fr, UiPx(5), false, c.bg, true, c.accent);
+            };
+            focusRing(st->rTriesEdit, st->editTries);
+            focusRing(st->rDaysEdit, st->editDays);
         }
 
         // ---- 解密：红字提示还能尝试几次 ----
@@ -955,16 +1012,27 @@ void SetEditPasswordMask(HWND edit, bool show) {
     UpdateWindow(edit);
 }
 
+// 按**当前**客户区尺寸重算圆角窗口区域。
+// 必须这样做的原因：控件若在尺寸为 0 时创建（例如“锁定时长”输入框在
+// “永久删除文件”模式下布局矩形是空的），CreateRoundRectRgn 会因为圆角
+// 直径大于盒子而得到一个**空区域**；之后即使把它挪到正确位置，窗口区域
+// 也不会自动重算，结果就是布局看着对、却既画不出来也点不到。
+void ApplyEditRoundRegion(HWND edit) {
+    if (!edit) return;
+    RECT rc;
+    GetClientRect(edit, &rc);
+    if (rc.right <= 0 || rc.bottom <= 0) return;   // 尺寸还没定下来，等下次
+    const int r = UiPx(5) * 2;
+    HRGN rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1, r, r);
+    if (rgn) SetWindowRgn(edit, rgn, TRUE);
+}
+
 // mask=true 时套用密码掩码。保护区的数字输入框必须传 false，
 // 否则会被当成密码框显示成一串星号。
 void ApplyEditTheme(HWND edit, const UiDlgState* st, bool mask = true) {
     if (!edit) return;
     UiDetheme(edit);
-    RECT rc;
-    GetClientRect(edit, &rc);
-    const int r = UiPx(5) * 2;
-    HRGN rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1, r, r);
-    if (rgn) SetWindowRgn(edit, rgn, TRUE);
+    ApplyEditRoundRegion(edit);
     if (mask) SetEditPasswordMask(edit, st->showPwd);
 }
 
@@ -982,6 +1050,28 @@ void EnsureDlgAnimation(HWND hDlg) {
     SetTimer(hDlg, DLG_ANIM_TIMER, DLG_ANIM_MS, NULL);
 }
 
+// 选中项变化时启动固定时长的滑动动画
+void StartRowSlide(UiDlgState::SegRow& row, int newSel) {
+    row.animFrom = row.animSel;
+    row.animTo = (float)newSel;
+    row.animStart = GetTickCount64();
+    row.animActive = (row.animFrom != row.animTo);
+}
+
+// 关闭请求统一走这里：先淡出，动画结束后由 TickDialogAnimation 真正销毁窗口。
+// 直接 DestroyWindow 的话关闭就没有动画了。
+void BeginCloseDialog(HWND hDlg, UiDlgState* st, int result) {
+    if (!st || st->closing) return;
+    st->closing = true;
+    st->closeResult = result;
+    st->closeAlpha = 255.0f;
+    st->layered = false;              // 放弃淡入，直接转为淡出
+    LONG_PTR ex = GetWindowLongPtrW(hDlg, GWL_EXSTYLE);
+    SetWindowLongPtrW(hDlg, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(hDlg, 0, 255, LWA_ALPHA);
+    EnsureDlgAnimation(hDlg);
+}
+
 void TickDialogAnimation(HWND hDlg, UiDlgState* st) {
     const ULONGLONG now = GetTickCount64();
     float dt = st->lastAnimTick ? (float)(now - st->lastAnimTick) / 1000.0f
@@ -992,8 +1082,21 @@ void TickDialogAnimation(HWND hDlg, UiDlgState* st) {
 
     bool active = false;
 
+    // 0) 关闭淡出：出现有动画，关闭也要有；淡完再真正销毁窗口
+    if (st->closing) {
+        st->closeAlpha -= 255.0f * dt / UI_CLOSE_FADE;
+        if (st->closeAlpha <= 0.0f) {
+            st->closeAlpha = 0.0f;
+            st->result = st->closeResult;
+            DestroyWindow(hDlg);
+            return;
+        }
+        SetLayeredWindowAttributes(hDlg, 0, (BYTE)st->closeAlpha, LWA_ALPHA);
+        active = true;
+    }
+
     // 入场淡入（约 140ms）；结束后移除分层样式，恢复正常渲染（不影响 ClearType）
-    if (st->layered) {
+    if (!st->closing && st->layered) {
         st->fadeAlpha += 255.0f * dt / 0.14f;
         if (st->fadeAlpha >= 255.0f) {
             st->fadeAlpha = 255.0f;
@@ -1032,20 +1135,31 @@ void TickDialogAnimation(HWND hDlg, UiDlgState* st) {
     }
 }
 
-// 设置对话框：选中底色滑动动画（约 160ms）
-void TickSettingsSlide(HWND hDlg, UiDlgState* st, float dt, bool& active) {
-    const float step = dt / 0.16f;
+// 设置对话框：选中底色的滑动动画。
+// 用「起点 + 目标 + 起始时刻」做固定时长的 ease-out，
+// 这样无论跨几个选项耗时都一样；之前每帧走固定步长，距离越远拖得越久。
+void TickSettingsSlide(HWND hDlg, UiDlgState* st, float /*dt*/, bool& active) {
+    const ULONGLONG now = GetTickCount64();
     bool moving = false;
     for (auto& row : st->rows) {
-        const float target = (float)row.selected;
-        if (row.animSel == target) continue;
-        const float diff = target - row.animSel;
-        if (diff > 0.0f) row.animSel = (row.animSel + step > target) ? target : row.animSel + step;
-        else             row.animSel = (row.animSel - step < target) ? target : row.animSel - step;
+        if (!row.animActive) continue;
+        const float t = (float)(now - row.animStart) / 1000.0f / UI_SLIDE_DURATION;
+        if (t >= 1.0f) {
+            row.animSel = row.animTo;
+            row.animActive = false;
+        }
+        else {
+            row.animSel = row.animFrom + (row.animTo - row.animFrom) * UiEaseOutCubic(t);
+            active = true;
+        }
+        // 只重画这一行的分段控件，不整窗重绘——整窗重绘每帧要重建几十个
+        // D2D 渲染目标，是滑动卡顿的主要原因
+        RECT r = row.segRc;
+        InflateRect(&r, UiPx(2), UiPx(2));
+        InvalidateRect(hDlg, &r, FALSE);
         moving = true;
-        if (row.animSel != target) active = true;
     }
-    if (moving) InvalidateRect(hDlg, NULL, FALSE);
+    (void)moving;
 }
 
 // ---- 设置对话框辅助 ----
@@ -1071,6 +1185,10 @@ void PositionPasswordControls(UiDlgState* st) {
         if (!h) return;
         SetWindowPos(h, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+        // 尺寸变了必须重算圆角区域，否则从 0 尺寸创建出来的控件会一直是空区域
+        wchar_t cls[32] = {};
+        GetClassNameW(h, cls, 32);
+        if (wcscmp(cls, L"Edit") == 0) ApplyEditRoundRegion(h);
         ShowWindow(h, visible ? SW_SHOW : SW_HIDE);
     };
     RECT none = {};
@@ -1110,7 +1228,7 @@ void ApplySettingsRowChange(HWND hDlg, UiDlgState* st, int key) {
         if (row.selected == 1) {
             const std::wstring picked = PickFolderDialog(hDlg, st->data.fixedDir);
             if (!picked.empty()) st->data.fixedDir = picked;
-            if (st->data.fixedDir.empty()) row.selected = 0;  // 没选到就退回“源文件同目录”
+            if (st->data.fixedDir.empty()) { StartRowSlide(row, 0); row.selected = 0; }  // 没选到就退回“源文件同目录”
         }
         break;
     }
@@ -1235,7 +1353,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // 按钮：先按 0 尺寸创建，随后统一从右向左排布
         for (size_t i = 0; i < st->btnIds.size(); ++i) {
             const int id = st->btnIds[i];
-            HWND b = CreateWindowExW(0, L"BUTTON", ButtonLabel(id).c_str(),
+            HWND b = CreateWindowExW(0, L"BUTTON", LabelFor(st, i, id).c_str(),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, UiPx(10), st->btnH, hwnd, (HMENU)(INT_PTR)id, inst, NULL);
             if (b) {
@@ -1245,6 +1363,9 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             st->btns.push_back(b);
         }
+        // 子控件是按布局矩形创建的，但要再摆一次：
+        // 一来保证位置/可见性与最新布局一致，二来让圆角区域按真实尺寸重算
+        PositionPasswordControls(st);
         PositionButtons(st);
 
         // Tab 顺序：输入框 -> 复选框 -> 按钮
@@ -1307,7 +1428,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_LBUTTONDOWN: {
-        if (!st) break;
+        if (!st || st->closing) break;   // 关闭淡出期间不再响应输入
         const POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
 
         if (st->isSettings) {
@@ -1317,8 +1438,9 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (!PtInRect(&row.itemRc[k], pt)) continue;
                     st->focusedRow = (int)i;
                     if (row.selected != (int)k) {
+                        StartRowSlide(row, (int)k);     // 固定时长，与跨几个选项无关
                         row.selected = (int)k;          // 一次点击立刻切换
-                        EnsureDlgAnimation(hwnd);       // 启动底色滑动动画
+                        EnsureDlgAnimation(hwnd);
                         ApplySettingsRowChange(hwnd, st, row.key);
                         return 0;
                     }
@@ -1353,8 +1475,16 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_COMMAND: {
         if (!st) break;
+        if (st->closing) return 0;       // 关闭淡出期间不再响应输入
         const int id = LOWORD(wParam);
         const int code = HIWORD(wParam);
+
+        // 输入框获得/失去焦点：记录并在对应位置画（或擦掉）蓝色聚焦边框
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+            st->focusedEdit = (code == EN_SETFOCUS) ? (HWND)lParam : nullptr;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
 
         if (code == EN_CHANGE && (id == IDC_UI_EDIT1 || id == IDC_UI_EDIT2)) {
             if (st->confirm) {
@@ -1461,8 +1591,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 st->password = buf1;
             }
-            st->result = id;
-            DestroyWindow(hwnd);
+            BeginCloseDialog(hwnd, st, id);   // 先淡出，动画结束后再销毁
             return 0;
         }
         break;
@@ -1476,10 +1605,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_CLOSE:
-        if (st) {
-            st->result = st->cancelId;
-            DestroyWindow(hwnd);
-        }
+        if (st) BeginCloseDialog(hwnd, st, st->cancelId);
         return 0;
 
     case WM_SETTINGCHANGE:
@@ -1580,6 +1706,7 @@ int RunDialog(HWND owner, UiDlgState* st) {
 
     const bool ownOwner = (owner && IsWindow(owner));
     if (ownOwner) EnableWindow(owner, FALSE);
+    ++g_modalDepth;   // 计数：主窗口据此判断能否安全销毁自己
 
     // 入场淡入：动画期间临时加 WS_EX_LAYERED（会让 ClearType 失效），
     // 淡入结束后立刻移除该样式，恢复正常的文字渲染。
@@ -1653,6 +1780,7 @@ int RunDialog(HWND owner, UiDlgState* st) {
                     if (sel < 0) sel = 0;
                     if (sel >= cnt) sel = cnt - 1;
                     if (sel != row.selected) {
+                        StartRowSlide(row, sel);
                         row.selected = sel;
                         EnsureDlgAnimation(hwnd);
                         ApplySettingsRowChange(hwnd, st, row.key);
@@ -1676,12 +1804,16 @@ int RunDialog(HWND owner, UiDlgState* st) {
         SetForegroundWindow(owner);
     }
 
+    if (g_modalDepth > 0) --g_modalDepth;
     return st->result;
 }
 
 } // namespace
 
 // ---------------------------------------------------------------- 对外接口
+
+int UiModalDepth() { return g_modalDepth; }
+
 
 int UiShowMessage(HWND owner, const UiMessage& m) {
     UiDlgState st;
@@ -1691,13 +1823,19 @@ int UiShowMessage(HWND owner, const UiMessage& m) {
     st.buttons = m.buttons;
     st.topmost = m.topmost;
     st.sound = m.sound;
+    st.btnLabels = m.labels;
 
     switch (m.buttons & 0x0F) {
     case MB_YESNO:
-    case MB_YESNOCANCEL:
         st.btnIds = { IDYES, IDNO };
         st.primaryId = IDYES;
         st.cancelId = IDNO;
+        break;
+    case MB_YESNOCANCEL:
+        // 三按钮：左 -> 右依次是 IDYES / IDNO / IDCANCEL
+        st.btnIds = { IDYES, IDNO, IDCANCEL };
+        st.primaryId = IDYES;
+        st.cancelId = IDCANCEL;
         break;
     case MB_OKCANCEL:
         st.btnIds = { IDOK, IDCANCEL };
@@ -1710,6 +1848,8 @@ int UiShowMessage(HWND owner, const UiMessage& m) {
         st.cancelId = IDOK;
         break;
     }
+    // 调用方可以用 primaryId 覆盖蓝色主按钮（例如把“取消”而不是“是”作为主按钮）
+    if (m.primaryId) st.primaryId = m.primaryId;
 
     const int r = RunDialog(owner, &st);
     if ((m.buttons & 0x0F) == MB_OK && r == 0) return IDOK;

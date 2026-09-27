@@ -67,6 +67,10 @@ void            UiDrawRoundRect(HDC dc, const RECT& rc, int radiusPx,
                                 bool border, COLORREF borderColor);
 void            UiDrawTextLine(HDC dc, const std::wstring& text, const RECT& rc,
                                HFONT font, COLORREF color, UINT flags);
+// 进度条高光：白色渐变光带，只在 rc 范围内绘制，centerX 为光带中心（绝对坐标），
+// halfWidth 为半宽，radiusPx 为圆角半径（需与所在进度条一致）
+void            UiDrawSheen(HDC dc, const RECT& rc, int radiusPx,
+                            float centerX, int halfWidth, BYTE alpha);
 
 // 双缓冲：把整帧先画到内存 DC，析构时一次性 BitBlt 到目标 DC。
 // 不这样做的话，背景填充、边框、标题、各行会逐个直接落到屏幕 DC 上，
