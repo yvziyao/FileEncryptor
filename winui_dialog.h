@@ -53,7 +53,9 @@ bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
                     const std::wstring& subtitle = std::wstring(),
                     bool showProtection = false,
                     UiProtection* ioProt = nullptr,
-                    int remainTries = -1);
+                    int remainTries = -1,
+                    bool showDecoy = false,
+                    bool* ioUseDecoy = nullptr);
 
 // 设置对话框的数据（取值与 app_settings 中的枚举一一对应）
 struct UiSettingsData {
@@ -64,6 +66,9 @@ struct UiSettingsData {
     int          secureDelete = 3;   // 0=禁用 1=覆写1次 3=覆写3次
     int          completion = 1;     // 0=关闭窗口 1=弹窗提示
     int          strength = 1;       // 0=快速 1=标准 2=安全 3=极强
+    int          decoyDisabled = 0;  // 1=不写第二个槽，体积约 1 倍（放弃不可区分性）
+    int          keepSource = 0;     // 1=加密后保留源文件，不做安全删除
+    int          shellMenu = 1;      // 1=在资源管理器右键菜单中显示
 };
 
 // 打开设置对话框；用户点“确定”返回 true 并回填 io

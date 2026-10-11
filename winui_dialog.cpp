@@ -1,4 +1,4 @@
-﻿// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
+// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
 //
 // 结构：
 //   UiDlgState        一次模态会话的全部状态（栈上分配，窗口销毁后返回）
@@ -36,6 +36,8 @@ std::wstring PickFolderDialog(HWND owner, const std::wstring& initial);
 #define IDC_UI_CHK_PROT 2004
 #define IDC_UI_TRIES    2005
 #define IDC_UI_DAYS     2006
+#define IDC_UI_CHK_DECOY 2007   // 可否认加密：使用诱饵文件
+#define IDC_UI_PASSES    2008   // 设置：安全删除覆写次数（数字输入框）
 
 namespace {
 
@@ -208,6 +210,30 @@ struct UiDlgState {
     HWND              edit1 = nullptr;
     HWND              edit2 = nullptr;
     HWND              chkShow = nullptr;
+    HWND              chkDecoy = nullptr;          // 诱饵文件复选框
+    bool              useDecoy = false;            // 是否启用诱饵
+    bool              showDecoyOption = false;     // 是否提供诱饵选项（仅加密单文件）
+    RECT              rChkDecoy{};
+    RECT              rChkDecoyHelp{};      // 诱饵说明的问号图标
+    HWND              hTip = nullptr;       // 悬停提示（TOOLTIPS_CLASS）
+    bool              tipAdded = false;     // tooltip 工具是否已注册
+    bool              helpHover = false;    // 鼠标是否停在「?」图标上
+    std::wstring      tipText;              // 提示文本（tooltip 只存指针，必须留住）
+    // 设置面板：「禁用诱饵文件」复选框
+    int               decoyDisabled = 0;
+    RECT              rDecoyBox{}, rDecoyLabel{}, rDecoyHelp{};
+    // 设置面板：「加密后保留源文件」复选框
+    int               keepSource = 0;
+    RECT              rKeepBox{}, rKeepLabel{};
+    // 设置面板：「在资源管理器右键菜单中显示」
+    int               shellMenu = 1;
+    RECT              rMenuBox{}, rMenuLabel{};
+    // 设置面板：「安全删除覆写次数」数字输入框（第 3 行，替换原来的分段控件）
+    HWND              editPasses = nullptr;
+    RECT              rPassesEdit{}, rPassesHint{};
+    std::wstring      passesHint;          // 空 = 不显示提示
+    bool              passesError = false; // true = 红色错误，false = 橙色警告
+    bool              passesValid = true;
     std::vector<HWND> btns;        // 与 btnIds / btnWidths 同序（左 -> 右）
     std::vector<int>  btnIds;
     std::vector<int>  btnWidths;
@@ -320,8 +346,57 @@ void TickSettingsSlide(HWND hDlg, UiDlgState* st, float dt, bool& active);
 // ---------------------------------------------------------------- 布局
 
 // 设置对话框布局：标题 + 若干“标签 + 分段控件”行 + 按钮
-void ComputeSettingsLayout(UiDlgState* st, HDC dc) {
-    HFONT fTitle = UiFont(UiPx(18), true);
+// 密码框里「使用诱饵文件」的悬停说明
+std::wstring DecoyTip() {
+    return tr(
+        L"勾选后可以再选一个「诱饵文件」并给它设一个假密码：\n"
+        L"真密码解开的是真实文件，假密码解开的是诱饵文件。\n"
+        L"两个槽位完全对称——文件本身看不出哪个是真、也没有「是否使用诱饵」的标志，\n"
+        L"所以受胁迫时可以交出错的那个密码。\n"
+        L"注意：文件体积约为明文的 2 倍；两个密码都知道的人两个文件都能解开。",
+        L"When checked, you can pick a decoy file and give it a fake password:\n"
+        L"the real password opens the real file, the fake one opens the decoy.\n"
+        L"The two slots are completely symmetric -- nothing in the file reveals which\n"
+        L"is which, nor even whether a decoy is used, so you can hand over the other\n"
+        L"password under coercion.\n"
+        L"Note: the file is about 2x the plaintext; anyone knowing both passwords can\n"
+        L"open both files.");
+}
+
+// 定义在后面（绘制区），这里先声明，供布局函数调用
+void SyncHelpTooltip(UiDlgState* st);
+
+// 诱饵复选框的悬停说明文案
+std::wstring DecoyTip();
+
+// 设置面板里「禁用诱饵文件」复选框的文案（布局与绘制共用，必须一致）
+std::wstring DecoyChkLabel() {
+    return tr(L"禁用诱饵文件（加密后体积不再翻倍）", L"Disable decoy (no size doubling)");
+}
+// 「加密后保留源文件」复选框文案
+std::wstring KeepChkLabel() {
+    return tr(L"加密后保留源文件（不删除）", L"Keep source files after encrypting");
+}
+
+// 「在资源管理器右键菜单中显示」复选框文案
+std::wstring MenuChkLabel() {
+    return tr(L"在资源管理器右键菜单中显示", L"Show in Explorer context menu");
+}
+
+// 悬停说明
+std::wstring DecoyChkTip() {
+    return tr(
+        L"勾选后，加密时只写入一个槽，文件体积约为原来的 1 倍（默认是 2 倍）。\n"
+        L"代价：文件大小会暴露「这个文件没有诱饵」——单槽恰好是 1 倍、双槽是 2 倍，\n"
+        L"因此「不可否认性」会减弱。只有确实不需要诱饵功能时才建议勾选。",
+        L"When checked, only one slot is written, so the file is about 1x the size\n"
+        L"(default is 2x).\n"
+        L"Trade-off: the file size then reveals that there is no decoy -- a single-slot\n"
+        L"file is exactly 1x while a dual-slot file is 2x, so deniability is weakened.\n"
+        L"Only enable this if you do not need the decoy feature.");
+}
+
+void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(UiPx(18), true);
 
     st->pad = UiPx(24);
     st->btnH = UiPx(32);
@@ -354,6 +429,29 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {
             if (rowNeed > needW) needW = rowNeed;
             (void)lw;
         }
+
+        // 「安全删除覆写次数」的提示行（警告 / 错误）也要放得下。
+        // 之前没算它 —— 中文够短看不出来，切到英文就被截成
+        // "Note: too many passes may reduce disk lifespan and slow d..."。
+        {
+            HFONT fSmall = UiFont(UiPx(12), false);
+            const std::wstring hints[] = {
+                tr(L"注意：覆写次数过多可能减少磁盘使用寿命，并降低删除速度",
+                   L"Note: too many passes may reduce disk lifespan and slow deletion"),
+                tr(L"错误：请输入1-10之间的数字",
+                   L"Error: please enter a number between 1 and 10"),
+            };
+            int maxHint = 0;
+            for (const auto& h : hints) {
+                int hw = 0, hh = 0;
+                MeasureText(dc, fSmall, h, UiPx(1200), true, &hw, &hh);
+                if (hw > maxHint) maxHint = hw;
+            }
+            // 提示行从 segLeft 开始，而 segLeft = pad + labelW + 16
+            const int hintNeed = st->pad * 2 + labelW + UiPx(16) + maxHint;
+            if (hintNeed > needW) needW = hintNeed;
+        }
+
         if (needW > winW) winW = needW;
     }
 
@@ -369,6 +467,22 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {
         r.labelRc = { st->contentX, y, st->contentX + labelW, y + rowH };
         const int segLeft = st->contentX + labelW + UiPx(16);
         r.segRc = { segLeft, y, st->contentX + st->contentW, y + rowH };
+
+        // 第 3 行是「安全删除覆写次数」的数字输入框，不是分段控件。
+        // 仍保留这一行占位，其它行的下标才不会错位。
+        if (r.key == 3) {
+            const int editW = UiPx(72);
+            const int editH = UiPx(28);
+            const int editTop = y + (rowH - editH) / 2;
+            st->rPassesEdit = { segLeft, editTop, segLeft + editW, editTop + editH };
+            r.itemRc.clear();
+            y += rowH + rowGap;
+            // 提示行始终占位：出现警告/错误时窗口尺寸不跳动
+            st->rPassesHint = { segLeft, y - rowGap + UiPx(2),
+                                st->contentX + st->contentW, y - rowGap + UiPx(2) + hintH };
+            y += hintH + UiPx(4);
+            continue;
+        }
 
         r.itemRc.clear();
         const int n = (int)r.options.size();
@@ -386,6 +500,51 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {
             st->hintVisible = true;
             y += hintH + UiPx(6);
         }
+    }
+
+    // 「禁用诱饵文件」复选框行（设置面板里唯一的复选框）
+    {
+        HFONT fBody = UiFont(UiPx(14), false);
+        int lw = 0, lh = 0;
+        MeasureText(dc, fBody, DecoyChkLabel(), UiPx(520), true, &lw, &lh);
+        const int boxW = UiPx(18);
+        const int chkH = UiPx(26);
+        const int boxTop = y + (chkH - boxW) / 2;
+        st->rDecoyBox   = { st->contentX, boxTop, st->contentX + boxW, boxTop + boxW };
+        st->rDecoyLabel = { st->rDecoyBox.right + UiPx(8), y,
+                            st->rDecoyBox.right + UiPx(8) + lw, y + chkH };
+        const int hs = UiPx(16);
+        const int hx = st->rDecoyLabel.right + UiPx(6);
+        st->rDecoyHelp  = { hx, y + (chkH - hs) / 2, hx + hs, y + (chkH - hs) / 2 + hs };
+        y += chkH + rowGap;
+    }
+
+    // 「加密后保留源文件」复选框（在诱饵复选框下面一行）
+    {
+        HFONT fBody = UiFont(UiPx(14), false);
+        int lw = 0, lh = 0;
+        MeasureText(dc, fBody, KeepChkLabel(), UiPx(520), true, &lw, &lh);
+        const int boxW = UiPx(18);
+        const int chkH = UiPx(26);
+        const int boxTop = y + (chkH - boxW) / 2;
+        st->rKeepBox   = { st->contentX, boxTop, st->contentX + boxW, boxTop + boxW };
+        st->rKeepLabel = { st->rKeepBox.right + UiPx(8), y,
+                           st->rKeepBox.right + UiPx(8) + lw, y + chkH };
+        y += chkH + rowGap;
+    }
+
+    // 「在资源管理器右键菜单中显示」复选框
+    {
+        HFONT fBody = UiFont(UiPx(14), false);
+        int lw = 0, lh = 0;
+        MeasureText(dc, fBody, MenuChkLabel(), UiPx(520), true, &lw, &lh);
+        const int boxW = UiPx(18);
+        const int chkH = UiPx(26);
+        const int boxTop = y + (chkH - boxW) / 2;
+        st->rMenuBox   = { st->contentX, boxTop, st->contentX + boxW, boxTop + boxW };
+        st->rMenuLabel = { st->rMenuBox.right + UiPx(8), y,
+                           st->rMenuBox.right + UiPx(8) + lw, y + chkH };
+        y += chkH + rowGap;
     }
 
     st->btnArea = { st->pad, y, winW - st->pad, y + st->btnH };
@@ -420,6 +579,7 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {
 void ComputeLayout(UiDlgState* st, HDC dc) {
     if (st->isSettings) {
         ComputeSettingsLayout(st, dc);
+        SyncHelpTooltip(st);     // 布局确定后同步「?」图标的悬停区域
         return;
     }
 
@@ -602,6 +762,26 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
         st->rChk = { st->contentX, y, st->contentX + st->contentW, y + UiPx(22) };
         y += UiPx(22) + UiPx(6);
 
+        // 诱饵文件（可否认加密）：只在加密单个文件时提供
+        if (st->showDecoyOption) {
+            // 复选框宽度只包住文字，右边留出「?」说明图标的位置
+            int lw = 0, lh = 0;
+            MeasureText(dc, UiFont(UiPx(14), false),
+                        tr(L"使用诱饵文件（可否认加密）", L"Use a decoy file (deniable)"),
+                        UiPx(420), true, &lw, &lh);
+            const int chkH = UiPx(22);
+            const int chkW = UiPx(18) + UiPx(10) + lw;   // 与 DrawOwnerCheckbox 的 box+gap 对齐
+            st->rChkDecoy = { st->contentX, y, st->contentX + chkW, y + chkH };
+            const int hs = UiPx(16);
+            const int hx = st->rChkDecoy.right + UiPx(4);
+            st->rChkDecoyHelp = { hx, y + (chkH - hs) / 2, hx + hs, y + (chkH - hs) / 2 + hs };
+            y += chkH + UiPx(6);
+        }
+        else {
+            st->rChkDecoy = {};
+            st->rChkDecoyHelp = {};
+        }
+
         // 错误行始终预留，避免出现错误时窗口尺寸变化
         st->rError = { st->contentX, y, st->contentX + st->contentW, y + UiPx(18) };
         y += UiPx(18) + UiPx(12);
@@ -638,6 +818,8 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
     else {
         st->iconSize = 0;
     }
+
+    SyncHelpTooltip(st);     // 布局确定后同步「?」图标的悬停区域
 }
 
 // ---------------------------------------------------------------- 自绘
@@ -693,14 +875,183 @@ void DrawOwnerButton(LPDRAWITEMSTRUCT pdis) {
 //   IDC_UI_SHOW       “显示密码”，自带文字
 //   IDC_UI_CHK_PROT   防暴力破解开关，只画方框（后面的说明文字由父窗口绘制，
 //                     这样它才能与次数输入框、分段控件排在同一行）
-void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {
+// 画一个圆圈问号：鼠标悬停时由 tooltip 显示具体说明
+void DrawHelpIcon(HDC dc, const RECT& rc) {
+    if (IsRectEmpty(&rc)) return;
     const UiPalette& c = UiColors();
+    const int d = (rc.bottom - rc.top);
+    UiDrawRoundRect(dc, rc, d / 2, true, c.bgAlt, true, c.border);
+    HFONT f = UiFont(UiPx(11), true);
+    if (f) {
+        RECT r = rc;
+        UiDrawTextLine(dc, L"?", r, f, c.textMuted,
+                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+// 读取「安全删除覆写次数」输入框并刷新提示；返回是否合法。
+// 规则：0-10 之外 -> 红色错误；4-10 -> 橙色警告（可能伤磁盘、且变慢）；0-3 -> 无提示。
+static bool ValidatePasses(UiDlgState* st) {
+    if (!st || !st->editPasses) return true;
+
+    wchar_t buf[16] = {};
+    GetWindowTextW(st->editPasses, buf, _countof(buf));
+
+    bool digitsOnly = (buf[0] != L'\0');
+    for (const wchar_t* p = buf; *p; ++p) {
+        if (*p < L'0' || *p > L'9') { digitsOnly = false; break; }
+    }
+
+    const int v = digitsOnly ? _wtoi(buf) : -1;
+    // 范围 1-10：0 对「安全删除」没有意义（不覆写就不是安全删除）
+    if (!digitsOnly || v < 1 || v > 10) {
+        st->passesHint = tr(L"错误：请输入1-10之间的数字",
+                            L"Error: please enter a number between 1 and 10");
+        st->passesError = true;
+        st->passesValid = false;
+        return false;
+    }
+    if (v > 3) {
+        st->passesHint = tr(L"注意：覆写次数过多可能减少磁盘使用寿命，并降低删除速度",
+                            L"Note: too many passes may reduce disk lifespan and slow deletion");
+        st->passesError = false;
+        st->passesValid = true;
+        return true;
+    }
+    st->passesHint.clear();
+    st->passesError = false;
+    st->passesValid = true;
+    return true;
+}
+
+// 读取「?」图标所在的矩形（设置面板 / 密码框）；没有则返回 nullptr
+const RECT* HelpIconRect(const UiDlgState* st) {
+    if (!st) return nullptr;
+    if (st->isSettings) return &st->rDecoyHelp;
+    if (st->isPassword && st->showDecoyOption) return &st->rChkDecoyHelp;
+    return nullptr;
+}
+
+// 自绘的悬停提示窗。
+//
+// 为什么不用通用控件的 TOOLTIPS_CLASS：实测 `CreateWindowExW(TOOLTIPS_CLASSW, ...)`
+// 在这个进程里始终返回 NULL（窗口枚举里根本没有 tooltip 窗口），提示框一次都不弹。
+// 这套 UI 本来就是全自绘的，提示框也自己画，样式更统一、也不依赖 comctl32 的行为。
+LRESULT CALLBACK HelpTipProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        const UiPalette& c = UiColors();
+        UiFillRect(dc, rc, c.bgAlt);
+        UiDrawRoundRect(dc, rc, UiPx(6), false, c.bgAlt, true, c.border);
+        const UiDlgState* st =
+            reinterpret_cast<const UiDlgState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (st && !st->tipText.empty()) {
+            RECT r = rc;
+            InflateRect(&r, -UiPx(10), -UiPx(8));
+            UiDrawTextLine(dc, st->tipText, r, UiFont(UiPx(12), false), c.text,
+                           DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// 每次布局后调用：把当前该显示的说明文本存起来（悬停时才真正弹窗）
+void SyncHelpTooltip(UiDlgState* st) {
+    if (!st) return;
+    if (st->isSettings)                        st->tipText = DecoyChkTip();
+    else if (st->isPassword && st->showDecoyOption) st->tipText = DecoyTip();
+    else                                       st->tipText.clear();
+}
+
+// 显示 / 隐藏「?」的悬停提示（自己驱动，不依赖 comctl32 的 tooltip）
+void SetHelpTipVisible(UiDlgState* st, bool visible) {
+    if (!st || !st->hwnd) return;
+    if (visible == st->helpHover) return;
+    st->helpHover = visible;
+
+    if (!visible) {
+        if (st->hTip) ShowWindow(st->hTip, SW_HIDE);
+        return;
+    }
+
+    const RECT* rc = HelpIconRect(st);
+    if (!rc || IsRectEmpty(rc) || st->tipText.empty()) return;
+
+    if (!st->hTip) {
+        static bool registered = false;
+        HINSTANCE inst = GetModuleHandleW(nullptr);
+        if (!registered) {
+            WNDCLASSEXW wc = {};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = HelpTipProc;
+            wc.hInstance = inst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.lpszClassName = L"FileEncryptorHelpTip";
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+        st->hTip = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                                   L"FileEncryptorHelpTip", L"", WS_POPUP,
+                                   0, 0, 10, 10, st->hwnd, nullptr, inst, nullptr);
+        if (!st->hTip) return;
+        SetWindowLongPtrW(st->hTip, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+    }
+
+    // 按文本量算尺寸：固定最大宽度，高度自适应
+    const int maxTextW = UiPx(340);
+    HDC dc = GetDC(st->hTip);
+    HFONT f = UiFont(UiPx(12), false);
+    HGDIOBJ old = f ? SelectObject(dc, f) : nullptr;
+    RECT calc = { 0, 0, maxTextW, 0 };
+    DrawTextW(dc, st->tipText.c_str(), -1, &calc,
+              DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    if (old) SelectObject(dc, old);
+    ReleaseDC(st->hTip, dc);
+    int w = calc.right + UiPx(20);
+    int h = calc.bottom + UiPx(16);
+
+    POINT p = { rc->left, rc->bottom + UiPx(6) };
+    ClientToScreen(st->hwnd, &p);
+
+    // 贴到屏幕外就翻到上方 / 往里收
+    HMONITOR mon = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    if (GetMonitorInfoW(mon, &mi)) {
+        if (p.x + w > mi.rcWork.right)  p.x = mi.rcWork.right - w - UiPx(4);
+        if (p.x < mi.rcWork.left)       p.x = mi.rcWork.left + UiPx(4);
+        if (p.y + h > mi.rcWork.bottom) {
+            POINT up = { rc->left, rc->top - UiPx(6) };
+            ClientToScreen(st->hwnd, &up);
+            p.y = up.y - h;
+            if (p.y < mi.rcWork.top) p.y = mi.rcWork.top + UiPx(4);
+        }
+    }
+
+    SetWindowPos(st->hTip, HWND_TOPMOST, p.x, p.y, w, h,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(st->hTip, NULL, TRUE);
+}
+
+void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {    const UiPalette& c = UiColors();
     RECT rc = pdis->rcItem;
     UiDoubleBuffer buffer(pdis->hDC, rc);
     HDC dc = buffer.Dc();
     UiFillRect(dc, rc, c.bg);   // 铺满，避免残留
-    const bool isProt = (pdis->CtlID == IDC_UI_CHK_PROT);
-    const bool checked = isProt ? st->prot.enabled : st->showPwd;
+    const bool isProt  = (pdis->CtlID == IDC_UI_CHK_PROT);
+    const bool isDecoy = (pdis->CtlID == IDC_UI_CHK_DECOY);
+    const bool checked = isProt ? st->prot.enabled
+                                : (isDecoy ? st->useDecoy : st->showPwd);
 
     const int box = UiPx(18);
     RECT boxRc = { rc.left, rc.top + (rc.bottom - rc.top - box) / 2,
@@ -722,11 +1073,19 @@ void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {
     if (isProt) return;   // 说明文字由父窗口画
 
     RECT labelRc = { boxRc.right + UiPx(10), rc.top, rc.right, rc.bottom };
-    UiDrawTextLine(dc, tr(L"显示密码", L"Show password"), labelRc,
-                   UiFont(UiPx(14), false), c.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    UiDrawTextLine(dc,
+                   isDecoy ? tr(L"使用诱饵文件（可否认加密）", L"Use a decoy file (deniable)")
+                           : tr(L"显示密码", L"Show password"),
+                   labelRc, UiFont(UiPx(14), false), c.text,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
 // 设置对话框：分段控件（SegmentedControl）风格的自绘行
+// 警告色（橙色）：调色板里没有，按深浅色各给一套
+static COLORREF WarningColor() {
+    return UiIsDark() ? RGB(255, 190, 92) : RGB(196, 108, 0);
+}
+
 void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
     const UiPalette& c = UiColors();
     HFONT fTitle = UiFont(UiPx(18), true);
@@ -744,6 +1103,23 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
 
     for (size_t i = 0; i < st->rows.size(); ++i) {
         const UiDlgState::SegRow& row = st->rows[i];
+
+        // 第 3 行是数字输入框（安全删除覆写次数），不是分段控件
+        if (row.key == 3) {
+            RECT plr = row.labelRc;
+            UiDrawTextLine(dc, row.label, plr, fBody, c.text,
+                           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            RECT well = st->rPassesEdit;
+            InflateRect(&well, UiPx(3), UiPx(3));
+            UiDrawRoundRect(dc, well, UiPx(5), true, c.bgAlt, true,
+                            st->passesError ? c.danger : c.border);
+            if (!st->passesHint.empty()) {
+                UiDrawTextLine(dc, st->passesHint, st->rPassesHint, fSmall,
+                               st->passesError ? c.danger : WarningColor(),
+                               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+            continue;
+        }
 
         RECT lr = row.labelRc;
         UiDrawTextLine(dc, row.label, lr, fBody, c.text,
@@ -793,6 +1169,61 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
         RECT hr = st->hintRc;
         UiDrawTextLine(dc, hint, hr, fSmall, c.textMuted,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_PATH_ELLIPSIS);
+    }
+
+    // 「禁用诱饵文件」复选框（设置面板里唯一的复选框）
+    if (!IsRectEmpty(&st->rDecoyBox)) {
+        if (st->decoyDisabled) {
+            UiDrawRoundRect(dc, st->rDecoyBox, UiPx(4), true, c.accent, false, c.accent);
+            HFONT iconFont = UiIconFont(UiPx(11));
+            if (iconFont) {
+                RECT gr = st->rDecoyBox;
+                UiDrawTextLine(dc, L"\uE73E", gr, iconFont, c.onAccent,
+                               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        } else {
+            UiDrawRoundRect(dc, st->rDecoyBox, UiPx(4), true, c.bgAlt, true, c.border);
+        }
+        RECT lr = st->rDecoyLabel;
+        UiDrawTextLine(dc, DecoyChkLabel(), lr, fBody, c.text,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawHelpIcon(dc, st->rDecoyHelp);
+    }
+
+    // 「加密后保留源文件」复选框
+    if (!IsRectEmpty(&st->rKeepBox)) {
+        if (st->keepSource) {
+            UiDrawRoundRect(dc, st->rKeepBox, UiPx(4), true, c.accent, false, c.accent);
+            HFONT iconFont = UiIconFont(UiPx(11));
+            if (iconFont) {
+                RECT gr = st->rKeepBox;
+                UiDrawTextLine(dc, L"\uE73E", gr, iconFont, c.onAccent,
+                               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        } else {
+            UiDrawRoundRect(dc, st->rKeepBox, UiPx(4), true, c.bgAlt, true, c.border);
+        }
+        RECT lr = st->rKeepLabel;
+        UiDrawTextLine(dc, KeepChkLabel(), lr, fBody, c.text,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // 「在资源管理器右键菜单中显示」复选框
+    if (!IsRectEmpty(&st->rMenuBox)) {
+        if (st->shellMenu) {
+            UiDrawRoundRect(dc, st->rMenuBox, UiPx(4), true, c.accent, false, c.accent);
+            HFONT iconFont = UiIconFont(UiPx(11));
+            if (iconFont) {
+                RECT gr = st->rMenuBox;
+                UiDrawTextLine(dc, L"\uE73E", gr, iconFont, c.onAccent,
+                               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        } else {
+            UiDrawRoundRect(dc, st->rMenuBox, UiPx(4), true, c.bgAlt, true, c.border);
+        }
+        RECT mr = st->rMenuLabel;
+        UiDrawTextLine(dc, MenuChkLabel(), mr, fBody, c.text,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
@@ -933,6 +1364,10 @@ void PaintNormalDialog(HDC dc, UiDlgState* st, const RECT& rcClient) {
         RECT r = st->rBody;
         UiDrawTextLine(dc, st->text, r, fBody, c.text, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
+
+    // 诱饵复选框右侧的「?」说明图标（复选框本身是子控件，图标由父窗口画）
+    if (st->isPassword && st->showDecoyOption)
+        DrawHelpIcon(dc, st->rChkDecoyHelp);
 
 }
 
@@ -1195,6 +1630,7 @@ void PositionPasswordControls(UiDlgState* st) {
     move(st->edit1, st->rEdit1Inner, true);
     move(st->edit2, st->rEdit2Inner, st->confirm);
     move(st->chkShow, st->rChk, true);
+        move(st->chkDecoy, st->rChkDecoy, true);
     if (st->showProtection) {
         const bool showDays = (st->prot.action == 1);
         move(st->chkProt, st->rChkProt, true);
@@ -1309,6 +1745,19 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AttachHover(st->chkShow);
             }
 
+            if (st->showDecoyOption) {
+                st->chkDecoy = CreateWindowExW(0, L"BUTTON", L"",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                    st->rChkDecoy.left, st->rChkDecoy.top,
+                    st->rChkDecoy.right - st->rChkDecoy.left,
+                    st->rChkDecoy.bottom - st->rChkDecoy.top,
+                    hwnd, (HMENU)(INT_PTR)IDC_UI_CHK_DECOY, inst, NULL);
+                if (st->chkDecoy) {
+                    UiDetheme(st->chkDecoy);
+                    AttachHover(st->chkDecoy);
+                }
+            }
+
             // ---- 防暴力破解设置区的子控件 ----
             if (st->showProtection) {
                 auto makeNumEdit = [&](int id, const RECT& r) {
@@ -1363,6 +1812,26 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             st->btns.push_back(b);
         }
+        // 设置面板：安全删除覆写次数（数字输入框）
+        if (st->isSettings) {
+            HWND e = CreateWindowExW(0, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL,
+                st->rPassesEdit.left, st->rPassesEdit.top,
+                st->rPassesEdit.right - st->rPassesEdit.left,
+                st->rPassesEdit.bottom - st->rPassesEdit.top,
+                hwnd, (HMENU)(INT_PTR)IDC_UI_PASSES, inst, NULL);
+            if (e) {
+                SendMessageW(e, WM_SETFONT, (WPARAM)UiFont(UiPx(14), false), TRUE);
+                SendMessageW(e, EM_SETLIMITTEXT, 2, 0);   // 0-10，最多两位
+                ApplyEditTheme(e, st, false);             // 数字框不用密码掩码
+                st->editPasses = e;
+                wchar_t buf[8] = {};
+                swprintf_s(buf, L"%d", (int)st->data.secureDelete);
+                SetWindowTextW(e, buf);
+                ValidatePasses(st);
+            }
+        }
+
         // 子控件是按布局矩形创建的，但要再摆一次：
         // 一来保证位置/可见性与最新布局一致，二来让圆角区域按真实尺寸重算
         PositionPasswordControls(st);
@@ -1372,6 +1841,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (st->edit1) st->tabOrder.push_back(st->edit1);
         if (st->confirm && st->edit2) st->tabOrder.push_back(st->edit2);
         if (st->chkShow) st->tabOrder.push_back(st->chkShow);
+        if (st->chkDecoy) st->tabOrder.push_back(st->chkDecoy);
         for (HWND b : st->btns) if (b) st->tabOrder.push_back(b);
 
         UiApplyFrame(hwnd, true, true);
@@ -1380,6 +1850,29 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_ERASEBKGND:
         return 1; // 背景由 WM_PAINT 完整绘制
+
+    case WM_MOUSEMOVE: {
+        // 注意：这里**不能**判断 st->hTip 是否为空 —— 提示窗正是由
+        // SetHelpTipVisible 按需创建的，先判空就永远建不起来（鸡生蛋）。
+        if (!st) break;
+        const POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
+        const RECT* rc = HelpIconRect(st);
+        if (rc && !IsRectEmpty(rc) && PtInRect(rc, pt)) {
+            SetHelpTipVisible(st, true);
+            TRACKMOUSEEVENT tme = {};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+        } else {
+            SetHelpTipVisible(st, false);
+        }
+        break;
+    }
+
+    case WM_MOUSELEAVE:
+        if (st) SetHelpTipVisible(st, false);
+        break;
 
     case WM_PAINT:
         if (st) PaintDialog(hwnd, st);
@@ -1394,11 +1887,23 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return reinterpret_cast<LRESULT>(st->altBrush ? st->altBrush : GetStockObject(WHITE_BRUSH));
     }
 
+    // 控件一旦被禁用，Windows 改发 WM_CTLCOLORSTATIC 而不是 WM_CTLCOLOREDIT。
+    // 只处理 EDIT 的话，禁用状态的输入框会掉回系统默认的浅色背景 —— 深色模式下很突兀。
+    case WM_CTLCOLORSTATIC: {
+        if (!st) break;
+        const UiPalette& c = UiColors();
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, c.textMuted);   // 禁用态用弱化色，视觉上也能看出不可编辑
+        SetBkColor(dc, c.bgAlt);
+        return reinterpret_cast<LRESULT>(st->altBrush ? st->altBrush : GetStockObject(WHITE_BRUSH));
+    }
+
     case WM_DRAWITEM: {
         LPDRAWITEMSTRUCT pdis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
         if (!pdis || !st) break;
         if (pdis->CtlType == ODT_BUTTON) {
-            if (pdis->CtlID == IDC_UI_SHOW || pdis->CtlID == IDC_UI_CHK_PROT)
+            if (pdis->CtlID == IDC_UI_SHOW || pdis->CtlID == IDC_UI_CHK_PROT ||
+            pdis->CtlID == IDC_UI_CHK_DECOY)
                 DrawOwnerCheckbox(pdis, st);
             else
                 DrawOwnerButton(pdis);
@@ -1418,11 +1923,30 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (st->confirm && PtInRect(&st->rEdit2, pt)) return HTCLIENT;
             // 保护区的分段控件由父窗口自绘并处理点击
             if (st->showProtection && PtInRect(&st->rSeg, pt)) return HTCLIENT;
+            // 「?」图标必须返回 HTCLIENT，才能收到 WM_MOUSEMOVE 弹提示
+            if (st->showDecoyOption && !IsRectEmpty(&st->rChkDecoyHelp) &&
+                PtInRect(&st->rChkDecoyHelp, pt))
+                return HTCLIENT;
         }
         if (st->isSettings) {
             for (const auto& r : st->rows) {
                 if (PtInRect(&r.segRc, pt)) return HTCLIENT;
             }
+            // 复选框区域必须返回 HTCLIENT，否则会被当成标题栏拖动窗口
+            if (!IsRectEmpty(&st->rDecoyBox) &&
+                (PtInRect(&st->rDecoyBox, pt) || PtInRect(&st->rDecoyLabel, pt)))
+                return HTCLIENT;
+            // 「?」图标同样必须返回 HTCLIENT：
+            // 否则该区域算标题栏，鼠标移上去只来 WM_NCMOUSEMOVE，
+            // 收不到 WM_MOUSEMOVE，悬停提示永远不会弹。
+            if (!IsRectEmpty(&st->rDecoyHelp) && PtInRect(&st->rDecoyHelp, pt))
+                return HTCLIENT;
+            if (!IsRectEmpty(&st->rKeepBox) &&
+                (PtInRect(&st->rKeepBox, pt) || PtInRect(&st->rKeepLabel, pt)))
+                return HTCLIENT;
+            if (!IsRectEmpty(&st->rMenuBox) &&
+                (PtInRect(&st->rMenuBox, pt) || PtInRect(&st->rMenuLabel, pt)))
+                return HTCLIENT;
         }
         return HTCAPTION; // 其余区域允许拖动整个卡片
     }
@@ -1447,6 +1971,27 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }
+            }
+            // 「禁用诱饵文件」复选框：点方块或文字都能切换（点问号图标不切换）
+            if (!IsRectEmpty(&st->rDecoyBox) &&
+                (PtInRect(&st->rDecoyBox, pt) || PtInRect(&st->rDecoyLabel, pt))) {
+                st->decoyDisabled = st->decoyDisabled ? 0 : 1;
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            // 「加密后保留源文件」
+            if (!IsRectEmpty(&st->rKeepBox) &&
+                (PtInRect(&st->rKeepBox, pt) || PtInRect(&st->rKeepLabel, pt))) {
+                st->keepSource = st->keepSource ? 0 : 1;
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            // 「在资源管理器右键菜单中显示」
+            if (!IsRectEmpty(&st->rMenuBox) &&
+                (PtInRect(&st->rMenuBox, pt) || PtInRect(&st->rMenuLabel, pt))) {
+                st->shellMenu = st->shellMenu ? 0 : 1;
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
             }
             return 0;
         }
@@ -1500,6 +2045,23 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        // 「安全删除覆写次数」：边输边校验，提示实时更新
+        if (id == IDC_UI_PASSES && code == EN_CHANGE) {
+            ValidatePasses(st);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
+        if (id == IDC_UI_CHK_DECOY) {
+            st->useDecoy = !st->useDecoy;
+            if (st->chkDecoy) {
+                SendMessageW(st->chkDecoy, BM_SETCHECK,
+                             st->useDecoy ? BST_CHECKED : BST_UNCHECKED, 0);
+                InvalidateRect(st->chkDecoy, NULL, FALSE);
+            }
+            return 0;
+        }
+
         if (id == IDC_UI_SHOW) {
             st->showPwd = !st->showPwd;
             // ApplyEditTheme 内部会重新写入文本以强制编辑控件立刻重绘
@@ -1521,6 +2083,21 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         if (id == IDOK || id == IDCANCEL || id == IDYES || id == IDNO) {
+            // 设置面板：覆写次数不合法就不让关，把焦点放回输入框
+            if (st->isSettings && id == IDOK) {
+                if (!ValidatePasses(st)) {
+                    MessageBeep(MB_ICONWARNING);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    if (st->editPasses) SetFocus(st->editPasses);
+                    return 0;
+                }
+                // 必须在这里取值：对话框一销毁，EDIT 子控件就没了，
+                // 之后再 GetWindowText 只会得到空串（会被 _wtoi 变成 0）。
+                wchar_t pbuf[16] = {};
+                if (st->editPasses) GetWindowTextW(st->editPasses, pbuf, _countof(pbuf));
+                const int pv = _wtoi(pbuf);
+                st->data.secureDelete = (pv < 0) ? 0 : (pv > 10 ? 10 : pv);
+            }
             if (st->isPassword && id == IDOK) {
                 wchar_t buf1[256] = {};
                 wchar_t buf2[256] = {};
@@ -1858,7 +2435,8 @@ int UiShowMessage(HWND owner, const UiMessage& m) {
 
 bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
                     const std::wstring& subtitle, bool showProtection,
-                    UiProtection* ioProt, int remainTries) {
+                    UiProtection* ioProt, int remainTries, bool showDecoy,
+                    bool* ioUseDecoy) {
     UiDlgState st;
     st.isPassword = true;
     st.confirm = confirm;
@@ -1872,6 +2450,9 @@ bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
     // 只有加密时才显示保护设置区
     st.showProtection = confirm && showProtection && ioProt != nullptr;
     if (st.showProtection) st.prot = *ioProt;
+    // 可否认加密：同样只在加密时提供，且由调用方决定（目前仅单文件）
+    st.showDecoyOption = confirm && showDecoy;
+    if (st.showDecoyOption && ioUseDecoy) st.useDecoy = *ioUseDecoy;
     // 解密时由调用方给出剩余次数用于红字提示，-1 表示不显示
     st.remainTries = confirm ? -1 : remainTries;
 
@@ -1879,6 +2460,7 @@ bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
     if (r == IDOK) {
         outPassword = WstringToUtf8(st.password);
         if (st.showProtection && ioProt) *ioProt = st.prot;
+        if (st.showDecoyOption && ioUseDecoy) *ioUseDecoy = st.useDecoy;
         return true;
     }
     return false;
@@ -1890,6 +2472,9 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
     st.sound = false;   // 设置面板不需要提示音
     st.caption = tr(L"设置", L"Settings");
     st.data = io;
+    st.decoyDisabled = io.decoyDisabled;
+    st.keepSource = io.keepSource;
+    st.shellMenu = io.shellMenu;
     st.btnIds = { IDOK, IDCANCEL };
     st.primaryId = IDOK;
     st.cancelId = IDCANCEL;
@@ -1915,9 +2500,8 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
            { tr(L"源文件同目录", L"Same folder"), tr(L"指定目录", L"Fixed folder"),
              tr(L"每次都询问", L"Ask each time") },
            st.data.outDir);
-    addRow(3, tr(L"安全删除源文件", L"Securely delete source"),
-           { tr(L"禁用", L"Off"), tr(L"覆写 1 次", L"1 pass"), tr(L"覆写 3 次", L"3 passes") },
-           st.data.secureDelete == 0 ? 0 : (st.data.secureDelete == 1 ? 1 : 2));
+    // 第 3 行不是分段控件：这一格放「安全删除覆写次数」数字输入框（0 = 不删除）
+    addRow(3, tr(L"安全删除覆写次数", L"Overwrite passes"), {}, 0);
     addRow(4, tr(L"完成后", L"When done"),
            { tr(L"关闭窗口", L"Close window"), tr(L"弹窗提示", L"Show dialog") },
            st.data.completion);
@@ -1932,8 +2516,12 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
     io.theme        = st.rows[1].selected;
     io.outDir       = st.rows[2].selected;
     io.fixedDir     = st.data.fixedDir;
-    io.secureDelete = st.rows[3].selected == 0 ? 0 : (st.rows[3].selected == 1 ? 1 : 3);
+    // 覆写次数已在点“确定”时取出（那时 EDIT 还在）；这里不能再去读控件
+    io.secureDelete = st.data.secureDelete;
     io.completion   = st.rows[4].selected;
     io.strength     = st.rows[5].selected;
+    io.decoyDisabled = st.decoyDisabled;
+    io.keepSource = st.keepSource;
+    io.shellMenu = st.shellMenu;
     return true;
 }

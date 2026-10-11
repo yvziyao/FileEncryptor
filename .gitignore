@@ -34,6 +34,8 @@ Debug/
 *.rsp
 *.up2date
 *.Up2Date
-
+*.aps
 # WinRT 自动生成的头文件
 Generated Files/
+# Release 页文案：本地用 Markdown 编辑，但不进仓库（不上传）
+*.txt

@@ -7,7 +7,6 @@
 enum class LangMode { Chinese = 0, English = 1 };
 enum class ThemeMode { System = 0, Light = 1, Dark = 2 };
 enum class OutDirMode { SourceDir = 0, FixedDir = 1, AskEveryTime = 2 };
-enum class SecureDeleteMode { Off = 0, Overwrite1 = 1, Overwrite3 = 3 };
 enum class CompletionMode { CloseWindow = 0, ShowDialog = 1 };
 enum class StrengthMode { Fast = 0, Standard = 1, Secure = 2, Extreme = 3 };
 
@@ -16,9 +15,18 @@ struct AppSettings {
     ThemeMode        theme = ThemeMode::System;
     OutDirMode       outDir = OutDirMode::SourceDir;
     std::wstring     fixedOutDir;
-    SecureDeleteMode secureDelete = SecureDeleteMode::Overwrite3;
+    // 安全删除覆写次数，1-10。设置面板里是个数字输入框。
+    int              secureDelete = 3;
+    // 加密/解密后保留源文件（不删除）。与覆写次数分开，
+    // 否则「不删除」这个选项在 1-10 的范围里没有位置。
+    bool             keepSource = false;
+    // 是否在资源管理器右键菜单中显示（关闭时会删除已注册的菜单项）
+    bool             shellMenu = true;
     CompletionMode   completion = CompletionMode::ShowDialog;
     StrengthMode     strength = StrengthMode::Standard;
+    // 禁用诱饵文件：加密时只写一个槽，体积约 1 倍。
+    // 代价是文件大小会暴露「没有诱饵」，不可否认性减弱。
+    bool             decoyDisabled = false;
 };
 
 // 全局单例
@@ -36,5 +44,5 @@ StrengthMode StrengthFromIterations(unsigned int iterations);
 std::wstring StrengthName(StrengthMode s);
 std::wstring ThemeName(ThemeMode t);
 std::wstring OutDirName(OutDirMode d);
-std::wstring SecureDeleteName(SecureDeleteMode d);
+std::wstring SecureDeleteName(int passes);
 std::wstring CompletionName(CompletionMode c);

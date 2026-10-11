@@ -1,4 +1,3 @@
-﻿#define OPENSSL_API_COMPAT 0x10100000L
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <windows.h>
@@ -14,11 +13,6 @@
 #include <memory>
 #include <cstring>
 #include <ctime>
-#include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\evp.h"
-#include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\rand.h"
-#include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\err.h"
-#include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\aes.h"
-#include "C:\\Program Files\\OpenSSL-Win64\\include\\openssl\\hmac.h"
 #include "resource.h"
 #include "app_settings.h"
 #include "winui_password.h"
@@ -30,6 +24,8 @@
 #include <thread>
 #include <atomic>
 #include <functional>
+#include <mutex>
+#include <deque>
 
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "User32.lib")
@@ -47,8 +43,11 @@
 // ---------- 全局变量 ----------
 HWND g_hBtn1 = NULL;
 HWND g_hBtn2 = NULL;
-HWND g_hLangBtn = NULL; // 语言切换按钮
+HWND g_hBtn3 = NULL;    // 安全删除
+HWND g_hLangBtn = NULL; // 右上角：设置（齿轮图标；控件 ID 5）
 bool g_hoverBtn[8] = {};      // 下标 = 控件 ID，鼠标是否悬停在该按钮上
+// 有文件正被拖到「安全删除」按钮上：此时按钮高亮，文字变成「松开删除」
+static bool g_dropOnDelete = false;
 bool g_trackingMouse = false;
 // 进度条改为自绘（标准 PROGRESS 控件做不出“绿色 + 白色扫光”的效果）
 static bool      g_progVisible = false;
@@ -72,6 +71,12 @@ void UpdateLanguageUI();
 
 // 底部状态文本（自绘，以支持深色模式）
 std::wstring g_statusText;
+// 进度条上方显示的当前文件名（只有文件名，不含路径）
+static std::wstring g_progFileName;
+// 任务队列计数：已完成 / 总数
+static std::atomic<int> g_tasksDone(0);      // 已完成
+static std::atomic<int> g_taskRunning(0);    // 1 = 有任务正在执行（这部分原先没被计进总数）
+
 
 // 自定义消息
 #define WM_APP_SET_STATUS    (WM_APP + 1)
@@ -81,6 +86,10 @@ std::wstring g_statusText;
 #define WM_APP_ASK_OUTPUT_PATH (WM_APP + 5)
 #define WM_APP_BACKGROUND_DONE (WM_APP + 6)   // “后台运行”的任务已结束，可以退出
 #define WM_APP_TRAY            (WM_APP + 7)   // 托盘图标回调
+#define WM_APP_SET_FILE        (WM_APP + 8)   // 正在处理的文件名（进度条上方显示）
+#define WM_APP_QUEUE_CHANGED   (WM_APP + 9)   // 队列计数变化，刷新显示
+#define WM_APP_SECURE_DELETE_DROP (WM_APP + 10)  // 有文件被拖到「安全删除」按钮上并松开
+#define WM_APP_LAUNCH          (WM_APP + 11)  // 命令行 / 右键菜单带进来的请求
 #define TIMER_BG_EXIT          2              // 等弹窗关闭后再退出后台进程
 
 // “每次都询问”输出位置时，工作线程请求 UI 线程弹一次保存对话框
@@ -103,6 +112,8 @@ static void SetProgressFraction(double overall);
 static void ProgressReset(uint64_t totalBytes);
 static void ProgressBeginFile(uint64_t fileBytes);
 static void ProgressAdd(uint64_t bytes);
+// 直接设定本文件已完成的工作量（用于把共用实现上报的字节数归一化）
+static void ProgressSetFile(uint64_t doneBytes);
 static void ProgressEndFile();
 static void ProgressFinish();
 static void CollectFilesRecursive(const std::wstring& path, std::vector<std::wstring>& out);
@@ -174,7 +185,9 @@ static void StartProcessing(std::vector<std::wstring> files,
                             std::vector<std::string> perFilePasswords,
                             std::string singlePassword,
                             std::vector<Protection> perFileProts,
-                            Protection singleProt);
+                            Protection singleProt,
+                            std::wstring decoyFile = std::wstring(),
+                            std::string  decoyPwd = std::string());
 static void ShowUiMessage(HWND owner, UiIcon icon, const std::wstring& caption,
                           const std::wstring& text, bool topmost);
 static void ApplyProgressBarTheme();
@@ -185,14 +198,136 @@ static std::wstring PasswordSubtitle(const std::wstring& file, size_t index, siz
 // 收集密码的结果
 enum class PwdCollect { Ok, Cancelled, Blocked };
 
+// ==================== 资源管理器右键菜单：启动请求 ====================
+// 类型定义放在这里（而不是 WinMain 旁边），因为 WndProc 的 WM_COPYDATA 要用到。
+enum class LaunchKind { None = 0, Encrypt = 1, SecureDelete = 2 };
+
+struct LaunchRequest {
+    LaunchKind kind = LaunchKind::None;
+    std::vector<std::wstring> files;
+};
+
+static const DWORD kLaunchCopyDataId = 0x46452E31;   // FE.1
+
+// 拖放 / 启动请求共用的暂存（都在主线程操作，但转发时可跨线程到达）
+static std::mutex                g_dropMutex;
+static std::vector<std::wstring> g_droppedForDelete;
+static std::vector<std::wstring> g_pendingLaunch;   // 主窗口建好之前的启动参数
+static int                       g_pendingKind = 0;
+static bool                      g_hasPendingLaunch = false;
+
+// WM_DROPFILES 用的内存布局。
+// 不直接用 shellapi.h 的 DROPFILES：不同 SDK 版本里的可见性不一致，自己定义更稳。
+struct DropFilesHeader {
+    DWORD pFiles;   // 文件列表相对本结构起点的字节偏移
+    POINT pt;
+    BOOL  fNC;
+    BOOL  fWide;    // TRUE = 宽字符路径
+};
+
+// 安全删除：先弹二次确认，用户点是才真正入队
+static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> files);
+static void StartSecureDelete(std::vector<std::wstring> files, int passes);
+// 定义在 WinMain 附近，这里先声明供 WM_COPYDATA 使用
+static bool UnpackLaunch(const BYTE* data, DWORD size, LaunchRequest& out);
+// 同样定义在 WinMain 附近；设置对话框保存后要立即应用右键菜单开关
+static void ApplyShellMenuSetting();
+
+// 把文件列表合成一个 HDROP 投给主窗口的 WM_DROPFILES。
+// 这样右键菜单的「加密」和直接拖放走的是**完全同一条**流程，不会漂移。
+// 接收方会调用 DragFinish 释放这块内存，所以所有权一并交出去。
+static void PostFilesAsDrop(HWND hWnd, const std::vector<std::wstring>& files) {
+    if (files.empty()) return;
+    size_t chars = 1;                                  // 结尾双 \0
+    for (const auto& f : files) chars += f.size() + 1;
+    const size_t bytes = sizeof(DropFilesHeader) + chars * sizeof(wchar_t);
+
+    HGLOBAL hMem = GlobalAlloc(GHND, bytes);
+    if (!hMem) return;
+    BYTE* base = (BYTE*)GlobalLock(hMem);
+    if (!base) { GlobalFree(hMem); return; }
+
+    DropFilesHeader* df = (DropFilesHeader*)base;
+    df->pFiles = sizeof(DropFilesHeader);
+    df->fWide = TRUE;
+    wchar_t* p = (wchar_t*)(base + sizeof(DropFilesHeader));
+    for (const auto& f : files) {
+        memcpy(p, f.c_str(), (f.size() + 1) * sizeof(wchar_t));
+        p += f.size() + 1;
+    }
+    *p = L'\0';
+    GlobalUnlock(hMem);
+
+    PostMessageW(hWnd, WM_DROPFILES, (WPARAM)hMem, 0);
+}
+
+// 右键多选时资源管理器会**为每个文件各启动一个进程**，转发过来的请求会密集到达。
+// 用一个短定时器把它们合并，这样只弹**一次**确认框、只建**一个**任务。
+#define TIMER_LAUNCH_GROUP  3
+#define LAUNCH_DEBOUNCE_MS  400
+
+static std::vector<std::wstring> g_launchFiles;
+static int                       g_launchKind = 0;
+
+// 收集一批启动请求；定时器到点后才真正处理
+static void QueueLaunchFiles(HWND hWnd, const std::vector<std::wstring>& files, int kind) {
+    if (files.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(g_dropMutex);
+        if (g_launchFiles.empty()) g_launchKind = kind;   // 类型以第一批为准
+        for (const auto& f : files) g_launchFiles.push_back(f);
+    }
+    // 每来一个请求就重置定时器，直到不再有新进程到来
+    SetTimer(hWnd, TIMER_LAUNCH_GROUP, LAUNCH_DEBOUNCE_MS, NULL);
+}
+
+// 处理命令行 / 右键菜单进来的请求
+static void DispatchLaunch(HWND hWnd, const std::vector<std::wstring>& files, int kind) {
+    if (files.empty()) return;
+    // 从托盘/最小化恢复，确认框才看得见
+    if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
+    ShowWindow(hWnd, SW_SHOW);
+    SetForegroundWindow(hWnd);
+
+    if (kind == 2) {                 // --secure-delete
+        ConfirmAndSecureDelete(hWnd, files);
+    } else if (kind == 1) {          // --encrypt
+        PostFilesAsDrop(hWnd, files);
+    }
+}
+
 // 加密前收集密码，同时让用户配置该文件的防暴力破解策略
 static bool CollectEncryptPassword(HWND owner, const std::wstring& subtitle,
                                    std::string& outPwd, Protection& outProt,
-                                   bool allowProtection);
+                                   bool allowProtection,
+                                   bool allowDecoy = false,
+                                   std::wstring* outDecoyFile = nullptr,
+                                   std::string* outDecoyPwd = nullptr);
 // 解密前收集密码：受保护文件会显示剩余次数，输错则扣减并重新弹框。
 // blockedMsg 在返回 Blocked 时给出原因（锁定中 / 次数用尽）。
 static PwdCollect CollectDecryptPassword(HWND owner, const std::wstring& file,
                                          std::string& outPwd, std::wstring& blockedMsg);
+
+// 一次加/解密任务。多次提交时进入队列，由同一个 worker 顺序处理，
+// 因此“有任务在跑时再次创建任务”不再报错，而是排队等待。
+struct TaskRequest {
+    std::vector<std::wstring> files;
+    std::vector<std::string>  perFilePasswords;
+    std::string               singlePassword;
+    std::vector<Protection>   perFileProts;
+    Protection                singleProt;
+    std::wstring              decoyFile;
+    std::string               decoyPwd;
+    // 「安全删除」任务：不解密、不加密，只按 deletePasses 覆写删除。
+    // 复用同一个队列，因此批量、进度条、后台托盘、队列计数全部自动具备。
+    bool                      isSecureDelete = false;
+    int                       deletePasses = 0;
+};
+
+// 待处理任务队列（std::deque 由 g_queueMutex 保护）。
+// 放在 TaskRequest 之后：它要用到这个类型。
+static std::mutex g_queueMutex;
+static std::deque<TaskRequest> g_taskQueue;
 
 // 投递到主线程显示的提示框负载
 struct UiMessagePayload {
@@ -254,9 +389,12 @@ bool ShowPasswordDialog(HWND hWnd, std::string& password, bool confirm,
                         const std::wstring& subtitle = std::wstring(),
                         bool showProtection = false,
                         UiProtection* ioProt = nullptr,
-                        int remainTries = -1) {
+                        int remainTries = -1,
+                        bool showDecoy = false,
+                        bool* ioUseDecoy = nullptr) {
     return ShowPasswordDialogWinUI(hWnd, password, confirm, subtitle,
-                                   showProtection, ioProt, remainTries);
+                                   showProtection, ioProt, remainTries,
+                                   showDecoy, ioUseDecoy);
 }
 
 
@@ -308,11 +446,25 @@ static std::wstring FormatDuration(uint64_t seconds) {
     return s;
 }
 
+// 文件格式（magic / 头部布局 / 偏移 / 标志位 / AAD 范围 / verifier 标签 /
+// 字节序读写）统一定义在 file_format.h，与 CLI 共用同一份实现 —— 避免两份漂移。
+// 注意：这里**不要** using namespace fe —— GUI 自己有 Protection / FormatDuration
+// 等同名符号，放开命名空间会撞名。所有共用实现一律显式写 fe::。
+#include "file_format.h"
+#include "file_crypto.h"   // 加解密核心的唯一实现（与 CLI 共用）
+// 取文件字节数；失败返回 0
+static uint64_t FileSizeOfPath(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER li = {};
+    const bool ok = GetFileSizeEx(h, &li) && li.QuadPart > 0;
+    CloseHandle(h);
+    return ok ? (uint64_t)li.QuadPart : 0;
+}
+
 class FileEncryptor {
 private:
-    struct EVP_CIPHER_CTX_deleter {
-        void operator()(EVP_CIPHER_CTX* p) { EVP_CIPHER_CTX_free(p); }
-    };
     struct HandleGuard {
         HANDLE h;
         explicit HandleGuard(HANDLE x) : h(x) {}
@@ -321,71 +473,10 @@ private:
         HandleGuard& operator=(const HandleGuard&) = delete;
     };
 
-    static const size_t kSaltLen = 16;
-    static const size_t kIvLen = 12;      // GCM 推荐 96-bit
-    static const size_t kTagLen = 16;
-    static const size_t kHeaderLenV2 = 64;
-    static const size_t kAadOff = 8;
-    static const size_t kAadLen = 46;      // 8..54
-    static const size_t kRemOff = 54;
-    static const size_t kLockOff = 56;
-    static const uint8_t kFlagProtected = 0x01;
-    static const uint8_t kFlagModeLock = 0x02;
+    // 格式常量与字节序读写见文件作用域的 file_format.h（与 CLI 共用）
 
-    static const uint8_t* Magic() {
-        static const uint8_t m[8] = { 'F', 'E', 'N', 'C', '\r', '\n', 0x1A, '\n' };
-        return m;
-    }
 
-    static void PutU16(std::vector<uint8_t>& v, uint16_t x) {
-        v.push_back((uint8_t)(x & 0xFF));
-        v.push_back((uint8_t)((x >> 8) & 0xFF));
-    }
-    static void PutU32(std::vector<uint8_t>& v, uint32_t x) {
-        v.push_back((uint8_t)(x & 0xFF));
-        v.push_back((uint8_t)((x >> 8) & 0xFF));
-        v.push_back((uint8_t)((x >> 16) & 0xFF));
-        v.push_back((uint8_t)((x >> 24) & 0xFF));
-    }
-    static void PutU64(std::vector<uint8_t>& v, uint64_t x) {
-        for (int i = 0; i < 8; ++i) v.push_back((uint8_t)((x >> (8 * i)) & 0xFF));
-    }
-    static uint16_t GetU16(const uint8_t* p) {
-        return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
-    }
-    static uint32_t GetU32(const uint8_t* p) {
-        return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-    }
-    static uint64_t GetU64(const uint8_t* p) {
-        uint64_t v = 0;
-        for (int i = 0; i < 8; ++i) v |= ((uint64_t)p[i]) << (8 * i);
-        return v;
-    }
-
-    static std::vector<uint8_t> DeriveKey(const std::string& password,
-                                          const std::vector<uint8_t>& salt,
-                                          int iterations) {
-        std::vector<uint8_t> key(32);
-        if (PKCS5_PBKDF2_HMAC(password.c_str(), (int)password.length(),
-                              salt.data(), (int)salt.size(),
-                              iterations, EVP_sha256(),
-                              (int)key.size(), key.data()) != 1) {
-            throw std::runtime_error("密钥派生失败");
-        }
-        return key;
-    }
-
-    // 密码验证标签：让“密码对不对”只需 PBKDF2 + 一次 HMAC，无需解密正文
-    static std::vector<uint8_t> VerifierOf(const std::vector<uint8_t>& key) {
-        static const char kLabel[] = "FileEncryptor/v2/verify";
-        unsigned char mac[EVP_MAX_MD_SIZE] = {};
-        unsigned int macLen = 0;
-        if (HMAC(EVP_sha256(), key.data(), (int)key.size(),
-                 (const unsigned char*)kLabel, sizeof(kLabel) - 1, mac, &macLen) == nullptr) {
-            throw std::runtime_error("计算验证标签失败");
-        }
-        return std::vector<uint8_t>(mac, mac + 8);
-    }
+    // 密钥派生 / verifier 计算已统一到 file_crypto.cpp，这里不再保留副本
 
     static void DecryptImpl(const std::wstring& input_path, const std::wstring& out_path,
                             const std::string& password);
@@ -398,212 +489,79 @@ public:
 
     // 读取文件头中的保护状态；返回 false 表示不是有效的 v2 加密文件
     static bool ReadProtState(const std::wstring& path, FileProtState& out) {
-        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h == INVALID_HANDLE_VALUE) return false;
-        HandleGuard guard(h);
-
-        uint8_t hdr[kHeaderLenV2] = {};
-        DWORD got = 0;
-        if (!ReadFile(h, hdr, (DWORD)kHeaderLenV2, &got, NULL) || got != kHeaderLenV2) return false;
-        if (memcmp(hdr, Magic(), 8) != 0) return false;
-        if (hdr[8] != 2) return false;
-
-        out.isV2 = true;
-        const uint8_t flags = hdr[9];
-        out.isProtected = (flags & kFlagProtected) != 0;
-        out.action = (flags & kFlagModeLock) ? ProtectionAction::Lock : ProtectionAction::Delete;
-        out.maxTries = (int)GetU16(&hdr[14]);
-        out.lockDays = (int)GetU16(&hdr[16]);
-        out.remaining = (int)GetU16(&hdr[kRemOff]);
-        out.lockUntil = GetU64(&hdr[kLockOff]);
+        fe::FileState st;
+        if (!fe::ReadProtState(path, st)) return false;
+        out.isV2        = true;
+        out.isProtected = st.isProtected;
+        out.action      = (st.action == fe::EXHAUST_LOCK) ? ProtectionAction::Lock
+                                                          : ProtectionAction::Delete;
+        out.maxTries    = st.maxTries;
+        out.remaining   = st.remaining;
+        out.lockDays    = st.lockDays;
+        out.lockUntil   = st.lockUntil;
         return true;
     }
-
-    // 只改写可变部分（剩余次数 / 锁定截止），不动密文。
-    // 这两个字段刻意不在 AAD 内，所以改写不会破坏 GCM 认证。
     static bool WriteMutableState(const std::wstring& path, int remaining, uint64_t lockUntil) {
-        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h == INVALID_HANDLE_VALUE) return false;
-        HandleGuard guard(h);
-
-        uint8_t buf[10];
-        buf[0] = (uint8_t)(remaining & 0xFF);
-        buf[1] = (uint8_t)((remaining >> 8) & 0xFF);
-        for (int i = 0; i < 8; ++i) buf[2 + i] = (uint8_t)((lockUntil >> (8 * i)) & 0xFF);
-
-        LARGE_INTEGER off;
-        off.QuadPart = (LONGLONG)kRemOff;
-        if (!SetFilePointerEx(h, off, NULL, FILE_BEGIN)) return false;
-        DWORD bw = 0;
-        if (!WriteFile(h, buf, sizeof(buf), &bw, NULL) || bw != sizeof(buf)) return false;
-        FlushFileBuffers(h);
-        return true;
+        return fe::WriteMutableState(path, remaining, lockUntil);
     }
-
-    // 快速校验密码：读头部 + PBKDF2 + HMAC 比对，**不解密正文**。
-    // GUI 的重试循环依赖这一点：输错一次不必把整个文件过一遍。
     static ProtVerify VerifyPassword(const std::wstring& path, const std::string& password,
                                      FileProtState& out) {
-        if (!ReadProtState(path, out)) return ProtVerify::Unavailable;
-
-        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h == INVALID_HANDLE_VALUE) return ProtVerify::Unavailable;
-        HandleGuard guard(h);
-
-        uint8_t hdr[kHeaderLenV2] = {};
-        DWORD got = 0;
-        if (!ReadFile(h, hdr, (DWORD)kHeaderLenV2, &got, NULL) || got != kHeaderLenV2)
-            return ProtVerify::Unavailable;
-
-        const int iterations = (int)GetU32(&hdr[10]);
-        if (iterations < 1000 || iterations > 10000000) return ProtVerify::Unavailable;
-
-        std::vector<uint8_t> salt(kSaltLen);
-        memcpy(salt.data(), &hdr[18], kSaltLen);
-
-        std::vector<uint8_t> key = DeriveKey(password, salt, iterations);
-        std::vector<uint8_t> expect = VerifierOf(key);
-
-        uint8_t diff = 0;
-        for (size_t i = 0; i < expect.size(); ++i) diff |= (uint8_t)(expect[i] ^ hdr[46 + i]);
-        return diff == 0 ? ProtVerify::Ok : ProtVerify::Wrong;
+        fe::FileState st;
+        const fe::VerifyResult r = fe::VerifyPassword(path, password, st);
+        if (r == fe::VerifyResult::Unavailable) return ProtVerify::Unavailable;
+        out.isV2        = true;
+        out.isProtected = st.isProtected;
+        out.action      = (st.action == fe::EXHAUST_LOCK) ? ProtectionAction::Lock
+                                                          : ProtectionAction::Delete;
+        out.maxTries    = st.maxTries;
+        out.remaining   = st.remaining;
+        out.lockDays    = st.lockDays;
+        out.lockUntil   = st.lockUntil;
+        return (r == fe::VerifyResult::Ok) ? ProtVerify::Ok : ProtVerify::Wrong;
     }
-
-    // 一次解密失败之后调用：扣减次数，必要时执行后果（删除文件 / 写入锁定截止）。
-    // 返回扣减后的剩余次数；<=0 表示已经用尽。outMsg 是给用户看的说明。
     static int ConsumeAttempt(const std::wstring& path, const FileProtState& st,
                               std::wstring& outMsg) {
-        if (!st.isProtected) return -1;
-
-        // 已处于锁定期且尚未到期：不重复扣减
-        if (st.lockUntil != 0 && NowUnix() < st.lockUntil) {
-            outMsg = tr(L"已锁定，剩余 ", L"Locked, remaining ")
-                   + FormatDuration(st.lockUntil - NowUnix());
-            return 0;
-        }
-
-        int remaining = st.remaining - 1;
-        if (remaining < 0) remaining = 0;
-
-        if (remaining > 0) {
-            WriteMutableState(path, remaining, 0);
-            outMsg = tr(L"还可尝试 ", L"Attempts left: ") + std::to_wstring(remaining)
-                   + tr(L" 次", L"");
-            return remaining;
-        }
-
-        if (st.action == ProtectionAction::Lock) {
-            const uint64_t until = NowUnix() + (uint64_t)st.lockDays * 86400ULL;
-            WriteMutableState(path, 0, until);
-            outMsg = tr(L"错误次数已达上限，已禁止解密 ", L"Too many failures; decryption disabled for ")
-                   + std::to_wstring(st.lockDays) + tr(L" 天", L" day(s)");
-            return 0;
-        }
-
-        // 永久删除：加密文件本身是密文，直接删除即可，无需覆写
-        DeleteFileW(path.c_str());
-        outMsg = tr(L"错误次数已达上限，加密文件已被永久删除",
-                    L"Too many failures; the encrypted file has been permanently deleted");
-        return 0;
+        fe::FileState fst;
+        fst.isProtected = st.isProtected;
+        fst.action      = (st.action == ProtectionAction::Lock) ? fe::EXHAUST_LOCK
+                                                                : fe::EXHAUST_DELETE;
+        fst.maxTries    = st.maxTries;
+        fst.remaining   = st.remaining;
+        fst.lockDays    = st.lockDays;
+        fst.lockUntil   = st.lockUntil;
+        std::string msg;
+        const int r = fe::ConsumeAttempt(path, fst, msg);
+        outMsg = utf8_to_wstring(msg);
+        return r;
     }
-
-    // 加密：始终写出 v2 格式（AES-256-GCM，含防暴力破解策略字段）
     static void encryptFileTo(const std::wstring& input_path, const std::wstring& out_path,
                               const std::string& password, int iterations,
-                              const Protection& prot = Protection()) {
-        const size_t CHUNK = 4 * 1024 * 1024; // 4MB
-        if (iterations <= 0) iterations = 100000;
+                              const Protection& prot,
+                              const std::wstring& decoy_path = std::wstring(),
+                              const std::string& decoy_password = std::string(),
+                              bool single_slot = false) {
+        fe::Protection fp;
+        fp.enabled  = prot.enabled;
+        fp.maxTries = prot.maxTries;
+        fp.action   = (prot.action == ProtectionAction::Lock) ? fe::EXHAUST_LOCK
+                                                              : fe::EXHAUST_DELETE;
+        fp.lockDays = prot.lockDays;
 
-        std::vector<uint8_t> salt(kSaltLen), iv(kIvLen);
-        if (RAND_bytes(salt.data(), (int)salt.size()) != 1) throw std::runtime_error("生成盐失败");
-        if (RAND_bytes(iv.data(), (int)iv.size()) != 1) throw std::runtime_error("生成IV失败");
-
-        std::vector<uint8_t> key = DeriveKey(password, salt, iterations);
-
-        HANDLE hFile = CreateFileW(input_path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) throw std::runtime_error("无法打开输入文件");
-        HandleGuard inGuard(hFile);
-
-        LARGE_INTEGER fileSizeLI;
-        if (!GetFileSizeEx(hFile, &fileSizeLI)) throw std::runtime_error("获取文件大小失败");
-        const uint64_t fileSize = (uint64_t)fileSizeLI.QuadPart;
-
-        HANDLE hOutFile = CreateFileW(out_path.c_str(), GENERIC_WRITE, 0, NULL,
-                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hOutFile == INVALID_HANDLE_VALUE) throw std::runtime_error("无法创建输出文件");
-        HandleGuard outGuard(hOutFile);
-
-        // 文件头（v2）
-        std::vector<uint8_t> header;
-        header.reserve(kHeaderLenV2);
-        const uint8_t* magic = Magic();
-        header.insert(header.end(), magic, magic + 8);
-        header.push_back(2);                       // version
-        header.push_back((uint8_t)(prot.enabled
-            ? (kFlagProtected | (prot.action == ProtectionAction::Lock ? kFlagModeLock : 0))
-            : 0));                                 // flags
-        PutU32(header, (uint32_t)iterations);
-        PutU16(header, (uint16_t)(prot.enabled ? prot.maxTries : 0));
-        PutU16(header, (uint16_t)(prot.enabled && prot.action == ProtectionAction::Lock
-                                      ? prot.lockDays : 0));
-        header.insert(header.end(), salt.begin(), salt.end());
-        header.insert(header.end(), iv.begin(), iv.end());
-        {
-            std::vector<uint8_t> verifier = VerifierOf(key);
-            header.insert(header.end(), verifier.begin(), verifier.end());
-        }
-        PutU16(header, (uint16_t)(prot.enabled ? prot.maxTries : 0));   // remaining
-        PutU64(header, 0);                                              // lockUntil
-        DWORD bytesWritten = 0;
-        WriteFile(hOutFile, header.data(), (DWORD)header.size(), &bytesWritten, NULL);
-
-        std::unique_ptr<EVP_CIPHER_CTX, EVP_CIPHER_CTX_deleter> ctx(EVP_CIPHER_CTX_new());
-        if (!ctx) throw std::runtime_error("创建EVP上下文失败");
-        if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
-            throw std::runtime_error("AES初始化失败");
-        if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, (int)kIvLen, nullptr) != 1)
-            throw std::runtime_error("设置GCM IV长度失败");
-        if (EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), iv.data()) != 1)
-            throw std::runtime_error("设置密钥失败");
-        // AAD：版本/标志/迭代次数/保护策略/salt/IV 一并纳入认证，
-        // 攻击者无法通过改动这些字节“关掉保护”（改了就会认证失败）
-        {
-            int aadOut = 0;
-            if (EVP_EncryptUpdate(ctx.get(), nullptr, &aadOut,
-                                  header.data() + kAadOff, (int)kAadLen) != 1)
-                throw std::runtime_error("写入AAD失败");
-        }
-
-        std::vector<uint8_t> inbuf(CHUNK);
-        std::vector<uint8_t> outbuf(CHUNK + 32);
-        DWORD bytesRead = 0;
-        ProgressBeginFile(fileSize);
-
-        while (ReadFile(hFile, inbuf.data(), (DWORD)inbuf.size(), &bytesRead, NULL) && bytesRead > 0) {
-            int outlen = 0;
-            if (EVP_EncryptUpdate(ctx.get(), outbuf.data(), &outlen, inbuf.data(), (int)bytesRead) != 1)
-                throw std::runtime_error("AES加密失败");
-            if (outlen > 0) { DWORD bw = 0; WriteFile(hOutFile, outbuf.data(), outlen, &bw, NULL); }
-            ProgressAdd(bytesRead);
-        }
-
-        int outlen = 0;
-        if (EVP_EncryptFinal_ex(ctx.get(), outbuf.data(), &outlen) != 1)
-            throw std::runtime_error("AES完成加密失败");
-        if (outlen > 0) { DWORD bw = 0; WriteFile(hOutFile, outbuf.data(), outlen, &bw, NULL); }
+        // 把共用实现上报的 (cur/total) 归一化成"本文件 = 1 个单位"。
+        // 直接用它上报的字节数会在保留源文件（总量只算 1 倍）时提前冲到 100%。
+        const uint64_t unit = FileSizeOfPath(input_path);
+        const double u = (double)(unit ? unit : 1);
+        bool started = false;
+        fe::ProgressFn prog = [&](uint64_t cur, uint64_t total) {
+            if (!started) { ProgressBeginFile(unit ? unit : 1); started = true; }
+            ProgressSetFile(total ? (uint64_t)((double)cur / (double)total * u) : 0);
+        };
+        fe::EncryptFileTo(input_path, out_path, password, iterations, fp,
+                          decoy_path, decoy_password, prog, single_slot);
+        if (!started) ProgressBeginFile(unit ? unit : 1);
+        ProgressSetFile(unit ? unit : 1);
         ProgressEndFile();
-
-        uint8_t tag[kTagLen] = {};
-        if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, (int)kTagLen, tag) != 1)
-            throw std::runtime_error("获取认证标签失败");
-        WriteFile(hOutFile, tag, (DWORD)kTagLen, &bytesWritten, NULL);
     }
-
-    // 解密：自动识别新旧格式，失败时清理半成品输出文件
     static void decryptFileTo(const std::wstring& input_path, const std::wstring& out_path,
                               const std::string& password) {
         try {
@@ -619,144 +577,35 @@ public:
 
 void FileEncryptor::DecryptImpl(const std::wstring& input_path, const std::wstring& out_path,
                                 const std::string& password) {
-    const size_t CHUNK = 4 * 1024 * 1024; // 4MB
-
-    HANDLE hFile = CreateFileW(input_path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) throw std::runtime_error("无法打开加密文件");
-    HandleGuard inGuard(hFile);
-
-    LARGE_INTEGER fileSizeLI;
-    if (!GetFileSizeEx(hFile, &fileSizeLI)) throw std::runtime_error("获取文件大小失败");
-    const uint64_t fileSize = (uint64_t)fileSizeLI.QuadPart;
-
-    // 只认 v2 格式：固定 64 字节文件头，AAD 一律读取
-    uint8_t hdr[kHeaderLenV2] = {};
-    DWORD got = 0;
-    if (!ReadFile(hFile, hdr, (DWORD)kHeaderLenV2, &got, NULL) || got != kHeaderLenV2)
-        throw std::runtime_error("不是有效的加密文件（文件过小或已被截断）");
-    if (memcmp(hdr, Magic(), 8) != 0)
-        throw std::runtime_error("不是有效的加密文件（文件标识不匹配）");
-    if (hdr[8] != 2)
-        throw std::runtime_error("不支持的加密文件版本");
-
-    const int iterations = (int)GetU32(&hdr[10]);
-    if (iterations < 1000 || iterations > 10000000)
-        throw std::runtime_error("文件头中的迭代次数非法");
-
-    std::vector<uint8_t> salt(kSaltLen), iv(kIvLen);
-    memcpy(salt.data(), &hdr[18], kSaltLen);
-    memcpy(iv.data(), &hdr[34], kIvLen);
-
-    uint8_t aad[kAadLen] = {};
-    memcpy(aad, &hdr[kAadOff], kAadLen);
-
-    const uint64_t overhead = (uint64_t)kHeaderLenV2 + kTagLen;
-    if (fileSize <= overhead) throw std::runtime_error("加密文件不完整");
-
-    std::vector<uint8_t> key = DeriveKey(password, salt, iterations);
-
-    HANDLE hOutFile = CreateFileW(out_path.c_str(), GENERIC_WRITE, 0, NULL,
-                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hOutFile == INVALID_HANDLE_VALUE) throw std::runtime_error("无法创建输出文件");
-    HandleGuard outGuard(hOutFile);
-
-    std::unique_ptr<EVP_CIPHER_CTX, EVP_CIPHER_CTX_deleter> ctx(EVP_CIPHER_CTX_new());
-    if (!ctx) throw std::runtime_error("创建EVP上下文失败");
-
-    {
-        int aadOut = 0;
-        if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-            EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, (int)kIvLen, nullptr) != 1 ||
-            EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), iv.data()) != 1 ||
-            EVP_DecryptUpdate(ctx.get(), nullptr, &aadOut, aad, (int)kAadLen) != 1) {
-            throw std::runtime_error("AES初始化失败");
-        }
-    }
-
-    const uint64_t cipherLen = fileSize - overhead;
-    uint64_t remaining = cipherLen;
-
-    std::vector<uint8_t> inbuf(CHUNK);
-    std::vector<uint8_t> outbuf(CHUNK + 32);
-
-    ProgressBeginFile(fileSize);
-
-    while (remaining > 0) {
-        const DWORD want = (DWORD)(remaining < (uint64_t)CHUNK ? remaining : (uint64_t)CHUNK);
-        DWORD rd = 0;
-        if (!ReadFile(hFile, inbuf.data(), want, &rd, NULL) || rd == 0)
-            throw std::runtime_error("读取加密文件失败");
-        int outlen = 0;
-        if (EVP_DecryptUpdate(ctx.get(), outbuf.data(), &outlen, inbuf.data(), (int)rd) != 1)
-            throw std::runtime_error("AES解密失败");
-        if (outlen > 0) { DWORD bw = 0; WriteFile(hOutFile, outbuf.data(), outlen, &bw, NULL); }
-        remaining -= rd;
-        ProgressAdd(rd);
-    }
-
-    {
-        uint8_t tag[kTagLen] = {};
-        DWORD rd = 0;
-        if (!ReadFile(hFile, tag, (DWORD)kTagLen, &rd, NULL) || rd != kTagLen)
-            throw std::runtime_error("读取认证标签失败");
-        if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, (int)kTagLen, tag) != 1)
-            throw std::runtime_error("设置认证标签失败");
-        int outlen = 0;
-        if (EVP_DecryptFinal_ex(ctx.get(), outbuf.data(), &outlen) != 1)
-            throw std::runtime_error("认证失败：密码错误或文件已被篡改");
-        if (outlen > 0) { DWORD bw = 0; WriteFile(hOutFile, outbuf.data(), outlen, &bw, NULL); }
-    }
-
+    // 同理归一化：.enc 里有两个槽，共用实现只解其中一个，
+    // 直接用它的字节数会让进度停在约 50% 再跳。
+    const uint64_t unit = FileSizeOfPath(input_path);
+    const double u = (double)(unit ? unit : 1);
+    bool started = false;
+    fe::ProgressFn prog = [&](uint64_t cur, uint64_t total) {
+        if (!started) { ProgressBeginFile(unit ? unit : 1); started = true; }
+        ProgressSetFile(total ? (uint64_t)((double)cur / (double)total * u) : 0);
+    };
+    fe::DecryptFileTo(input_path, out_path, password, prog);
+    if (!started) ProgressBeginFile(unit ? unit : 1);
+    ProgressSetFile(unit ? unit : 1);
     ProgressEndFile();
 }
-
 // 安全删除：passes 为覆写次数（0 = 直接删除）
 static void SecureDeleteFile(const std::wstring& wPath, int passes,
                              const std::function<void(uint64_t)>& onProgress) {
-    if (passes <= 0) {
-        DeleteFileW(wPath.c_str());
-        return;
+    if (onProgress) {
+        // 共用实现上报的是**累计**字节数，而 onProgress 的约定是“本次新增”。
+        // 必须在这里转成增量 —— 否则调用方会把累计值当增量反复累加，
+        // 进度呈平方级暴涨（10GB 覆写只写几十 MB 就冲到 100%）。
+        uint64_t last = 0;
+        fe::SecureDeleteFile(wPath, passes, [&onProgress, &last](uint64_t cur, uint64_t) {
+            if (cur > last) { onProgress(cur - last); last = cur; }
+        });
+    } else {
+        fe::SecureDeleteFile(wPath, passes);
     }
-    try {
-        HANDLE hFile = CreateFileW(wPath.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            LARGE_INTEGER fileSizeLI;
-            if (GetFileSizeEx(hFile, &fileSizeLI) && fileSizeLI.QuadPart > 0) {
-                uint64_t fileSize = (uint64_t)fileSizeLI.QuadPart;
-                const size_t CHUNK = 64 * 1024; // 64KB
-                std::vector<uint8_t> buf(CHUNK);
-                for (int pass = 0; pass < passes; ++pass) {
-                    LARGE_INTEGER zero = { 0 };
-                    SetFilePointerEx(hFile, zero, NULL, FILE_BEGIN);
-                    uint64_t remaining = fileSize;
-                    while (remaining > 0) {
-                        size_t toWrite = (size_t)(remaining < (uint64_t)CHUNK ? remaining : (uint64_t)CHUNK);
-                        RAND_bytes(buf.data(), (int)toWrite);
-                        // 交替写入随机数据与随机数据的反码，覆盖更彻底
-                        if (pass % 2 == 1) {
-                            for (size_t i = 0; i < toWrite; ++i) buf[i] = (uint8_t)~buf[i];
-                        }
-                        DWORD written = 0;
-                        WriteFile(hFile, buf.data(), (DWORD)toWrite, &written, NULL);
-                        remaining -= written;
-                        if (onProgress && written) onProgress((uint64_t)written);
-                    }
-                    FlushFileBuffers(hFile);
-                }
-            }
-            CloseHandle(hFile);
-        }
-    }
-    catch (...) {
-        // best-effort：无论如何都要尝试删除
-    }
-    DeleteFileW(wPath.c_str());
 }
-
-// ---------- GUI 部分 ----------
-#include "FileEncryptor_helpers.h"
-
 std::wstring g_exe_dir;
 
 std::wstring GetExeDirectoryW() {
@@ -846,6 +695,40 @@ std::wstring PickFolderDialog(HWND owner, const std::wstring& initial) {
     return result;
 }
 
+// 安全删除用的**多选**文件选择器（加密/解密按钮是单选，删除要批量更顺手）
+static std::vector<std::wstring> PickFilesForDelete(HWND owner) {
+    std::vector<std::wstring> out;
+    IFileOpenDialog* dlg = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&dlg))) && dlg) {
+        DWORD opts = 0;
+        if (SUCCEEDED(dlg->GetOptions(&opts))) {
+            dlg->SetOptions(opts | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST);
+        }
+        if (SUCCEEDED(dlg->Show(owner))) {
+            IShellItemArray* items = nullptr;
+            if (SUCCEEDED(dlg->GetResults(&items)) && items) {
+                DWORD n = 0;
+                items->GetCount(&n);
+                for (DWORD i = 0; i < n; ++i) {
+                    IShellItem* it = nullptr;
+                    if (SUCCEEDED(items->GetItemAt(i, &it)) && it) {
+                        PWSTR path = nullptr;
+                        if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                            out.push_back(path);
+                            CoTaskMemFree(path);
+                        }
+                        it->Release();
+                    }
+                }
+                items->Release();
+            }
+        }
+        dlg->Release();
+    }
+    return out;
+}
+
 // 状态文本由主窗口自绘（见 WM_PAINT），以便跟随深浅色主题
 void SetStatusText(const std::wstring& text) {
     g_statusText = text;
@@ -900,6 +783,16 @@ static void ProgressAdd(uint64_t bytes) {
     SetProgressFraction((double)overall / (double)g_progTotalBytes.load());
 }
 
+// 直接设定"本文件已完成的工作量"。
+// v3 会写两段密文（真实载荷 + 诱饵/随机填充），实际字节数约为文件的两倍，
+// 所以不能拿共用实现上报的字节数直接当进度，必须按比例归一到文件大小，
+// 才能和 ProgressReset 里 (文件大小 ×(1+覆写次数)) 的口径对齐。
+static void ProgressSetFile(uint64_t doneBytes) {
+    g_progFileDone = doneBytes;
+    const uint64_t overall = g_progDoneBytes.load() + g_progFileDone.load();
+    SetProgressFraction((double)overall / (double)g_progTotalBytes.load());
+}
+
 static void ProgressEndFile() {
     g_progDoneBytes += g_progFileTotal.load();
     g_progFileTotal = 0;
@@ -948,6 +841,131 @@ static void StartAnimation();
 // 主界面按钮的子类化过程：按钮自己跟踪鼠标进入/离开。
 // 之前靠父窗口的 WM_MOUSEMOVE 判断，但鼠标落在子控件上时父窗口收不到该消息，
 // 导致主界面按钮实际上从来没有悬停高亮。
+// ==================== 「安全删除」按钮的 OLE 拖放目标 ====================
+//
+// 为什么要用 IDropTarget 而不是 WM_DROPFILES：
+// 需求是「文件拖到按钮**上方**时按钮就高亮、文字变成松开删除」。
+// DragAcceptFiles/WM_DROPFILES 只在**松手那一刻**才给一次消息，
+// 拿不到「拖拽经过」的时机；OLE 的 DragEnter/DragOver/DragLeave 才可以。
+
+// 切换按钮的「拖拽悬停」外观
+static void SetDropOnDelete(bool on) {
+    if (g_dropOnDelete == on) return;
+    g_dropOnDelete = on;
+    if (g_hBtn3) {
+        SetWindowTextW(g_hBtn3, on ? tr(L"松开删除", L"Release to delete").c_str()
+                                   : tr(L"安全删除", L"Secure delete").c_str());
+        InvalidateRect(g_hBtn3, NULL, FALSE);
+    }
+}
+
+// 数据对象里是否有文件（CF_HDROP）
+static bool DropHasFiles(IDataObject* data) {
+    if (!data) return false;
+    FORMATETC fmt = { CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+    return data->QueryGetData(&fmt) == S_OK;
+}
+
+// 取出拖进来的文件（目录会递归展开）
+static bool DropExtractFiles(IDataObject* data, std::vector<std::wstring>& out) {
+    if (!data) return false;
+    FORMATETC fmt = { CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+    STGMEDIUM med = {};
+    if (data->GetData(&fmt, &med) != S_OK) return false;
+
+    bool ok = false;
+    HDROP hDrop = (HDROP)GlobalLock(med.hGlobal);
+    if (hDrop) {
+        const UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
+        for (UINT i = 0; i < count; ++i) {
+            wchar_t buf[MAX_PATH * 4];
+            if (DragQueryFileW(hDrop, i, buf, _countof(buf))) {
+                std::wstring p(buf);
+                const DWORD attrs = GetFileAttributesW(p.c_str());
+                if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+                    CollectFilesRecursive(p, out);
+                else
+                    out.push_back(p);
+            }
+        }
+        GlobalUnlock(med.hGlobal);
+        ok = true;
+    }
+    ReleaseStgMedium(&med);
+    return ok;
+}
+
+class DeleteDropTarget : public IDropTarget {
+public:
+    explicit DeleteDropTarget(HWND owner) : owner_(owner) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+            *ppv = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return (ULONG)InterlockedIncrement(&ref_);
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG n = (ULONG)InterlockedDecrement(&ref_);
+        if (n == 0) delete this;
+        return n;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
+        const bool has = DropHasFiles(data);
+        SetDropOnDelete(has);
+        if (effect) *effect = has ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* effect) override {
+        if (effect) *effect = DROPEFFECT_COPY;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        SetDropOnDelete(false);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
+        SetDropOnDelete(false);
+        if (effect) *effect = DROPEFFECT_COPY;
+
+        std::vector<std::wstring> files;
+        if (!DropExtractFiles(data, files) || files.empty()) return S_OK;
+
+        // 先把待删清单存好，再通知主线程 —— 顺序反了确认框会读到空列表
+        {
+            std::lock_guard<std::mutex> lk(g_dropMutex);
+            g_droppedForDelete = std::move(files);
+        }
+        if (owner_) PostMessageW(owner_, WM_APP_SECURE_DELETE_DROP, 0, 0);
+        return S_OK;
+    }
+
+private:
+    LONG ref_ = 1;
+    HWND owner_ = nullptr;
+};
+
+// 全局持有：Release 时自删，这里存裸指针即可
+static DeleteDropTarget* g_deleteDropTarget = nullptr;
+
+static void RegisterDeleteDropTarget(HWND owner, HWND btn) {
+    if (!btn) return;
+    OleInitialize(NULL);   // 幂等；已初始化会返回 S_FALSE
+    g_deleteDropTarget = new DeleteDropTarget(owner);
+    if (RegisterDragDrop(btn, g_deleteDropTarget) != S_OK) {
+        g_deleteDropTarget->Release();
+        g_deleteDropTarget = nullptr;
+    }
+}
+
 static LRESULT CALLBACK MainBtnSubclassProc(HWND h, UINT msg, WPARAM wParam, LPARAM lParam,
                                             UINT_PTR id, DWORD_PTR) {
     const int ctl = (int)id;
@@ -989,6 +1007,11 @@ static int MainButtonWidth() {
     int textW = measure(tr(L"加密文件", L"Encrypt file"));
     const int w2 = measure(tr(L"解密文件", L"Decrypt file"));
     if (w2 > textW) textW = w2;
+    // 安全删除按钮的文案更长（"松开删除" 也要放得下），一并计入
+    const int w3 = measure(tr(L"安全删除", L"Secure delete"));
+    if (w3 > textW) textW = w3;
+    const int w3b = measure(tr(L"松开删除", L"Release to delete"));
+    if (w3b > textW) textW = w3b;
 
     if (old) SelectObject(dc, old);
     ReleaseDC(NULL, dc);
@@ -998,7 +1021,8 @@ static int MainButtonWidth() {
 }
 
 static int MainClientWidth() {
-    return MainButtonWidth() * 2 + UiPx(16) + UiPx(2 * 28);
+    // 三个按钮并排 + 两个间距 + 左右留白
+    return MainButtonWidth() * 3 + UiPx(16) * 2 + UiPx(2 * 28);
 }
 
 // 顶部第一行留给右上角的设置按钮，主按钮放在它下方，两者不重叠
@@ -1010,17 +1034,18 @@ static int ProgressRectTop() { return UiPx(kMainBtnY) + UiPx(44) + UiPx(16); }
 static int MainClientHeight(bool busy) {
     const int btnY = UiPx(kMainBtnY);
     const int btnH = UiPx(44);
-    const int statusH = UiPx(28);
-    if (!busy) return btnY + btnH + UiPx(20) + statusH;
+    if (!busy) return btnY + btnH + UiPx(20);   // 已去掉底部状态栏
 
-    // 工作中：进度条 + 下方一行“进度 / 预计剩余时间”（已无取消按钮）
-    return ProgressRectTop() + UiPx(18) + UiPx(6) + UiPx(18) + UiPx(16) + statusH;
+    // 工作中：文件名行 + 进度条 + 下方“进度 / 预计剩余时间（左）+ 队列计数（右）”
+    return ProgressRectTop() + UiPx(18) + UiPx(6) + UiPx(18) + UiPx(6) + UiPx(18) + UiPx(16);
 }
 
-static void ProgressRects(const RECT& rc, RECT& bar, RECT& info) {
+// 三行：文件名（进度条上方）、进度条、信息行（下方）
+static void ProgressRects(const RECT& rc, RECT& file, RECT& bar, RECT& info) {
     const int pad = UiPx(24);
     const int top = ProgressRectTop();
-    bar = { pad, top, rc.right - pad, top + UiPx(18) };
+    file = { pad, top, rc.right - pad, top + UiPx(18) };
+    bar  = { pad, file.bottom + UiPx(6), rc.right - pad, file.bottom + UiPx(6) + UiPx(18) };
     info = { pad, bar.bottom + UiPx(6), rc.right - pad, bar.bottom + UiPx(6) + UiPx(18) };
 }
 
@@ -1109,6 +1134,7 @@ static void TickAnimation(HWND hWnd) {
     const BtnTarget targets[] = {
         { 1, g_hBtn1,    g_hoverBtn[1] ? 1.0f : 0.0f },
         { 2, g_hBtn2,    g_hoverBtn[2] ? 1.0f : 0.0f },
+        { 3, g_hBtn3,    g_hoverBtn[3] ? 1.0f : 0.0f },
         { 5, g_hLangBtn, g_hoverBtn[5] ? 1.0f : 0.0f },
     };
     const float hoverStep = dt / 0.12f;
@@ -1191,20 +1217,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // 使用 owner-draw 按钮以便绘制圆角，符合 WinUI 3 风格
         HWND hBtn1 = CreateWindowW(L"BUTTON", tr(L"加密文件", L"Encrypt file").c_str(), WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 30, 30, 140, 40, hWnd, (HMENU)1, GetModuleHandle(NULL), NULL);
         HWND hBtn2 = CreateWindowW(L"BUTTON", tr(L"解密文件", L"Decrypt file").c_str(), WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 190, 30, 140, 40, hWnd, (HMENU)2, GetModuleHandle(NULL), NULL);
-        // 语言切换按钮（右上角），同样 owner-draw 以保持风格一致
-        HWND hLang = CreateWindowW(L"BUTTON", g_langEnglish ? L"EN" : L"中", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 360, 10, 40, 28, hWnd, (HMENU)5, GetModuleHandle(NULL), NULL);
+        HWND hBtn3 = CreateWindowW(L"BUTTON", tr(L"安全删除", L"Secure delete").c_str(), WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 350, 30, 140, 40, hWnd, (HMENU)3, GetModuleHandle(NULL), NULL);
+        // 右上角设置按钮（齿轮图标），同样 owner-draw 以保持风格一致
+        HWND hLang = CreateWindowW(L"BUTTON", L"", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 360, 10, 40, 28, hWnd, (HMENU)5, GetModuleHandle(NULL), NULL);
         g_hBtn1 = hBtn1;
         g_hBtn2 = hBtn2;
+        g_hBtn3 = hBtn3;
         g_hLangBtn = hLang;
 
         // 按钮自己跟踪鼠标悬停（父窗口在鼠标位于子控件上时收不到 WM_MOUSEMOVE）
         if (hBtn1) SetWindowSubclass(hBtn1, MainBtnSubclassProc, 1, 0);
         if (hBtn2) SetWindowSubclass(hBtn2, MainBtnSubclassProc, 2, 0);
+        if (hBtn3) SetWindowSubclass(hBtn3, MainBtnSubclassProc, 3, 0);
         if (hLang) SetWindowSubclass(hLang, MainBtnSubclassProc, 5, 0);
 
         if (uiFont) {
             SendMessageW(hBtn1, WM_SETFONT, (WPARAM)uiFont, TRUE);
             SendMessageW(hBtn2, WM_SETFONT, (WPARAM)uiFont, TRUE);
+            if (hBtn3) SendMessageW(hBtn3, WM_SETFONT, (WPARAM)uiFont, TRUE);
             if (g_hLangBtn) SendMessageW(g_hLangBtn, WM_SETFONT, (WPARAM)uiFont, TRUE);
         }
 
@@ -1212,9 +1242,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // 接受文件拖拽
         DragAcceptFiles(hWnd, TRUE);
+        // 「安全删除」按钮单独注册 OLE 拖放目标：只有这样才能在拖拽**经过**时
+        // 收到 DragEnter/DragOver，做出「松开删除」的实时反馈。
+        // WM_DROPFILES 只在松手那一刻触发，做不出这种效果。
+        RegisterDeleteDropTarget(hWnd, hBtn3);
 
         // 主窗口使用 DWM 圆角 + 跟随系统的深色标题栏
         UiApplyFrame(hWnd, true, UiIsDark());
+
+        // 命令行/右键菜单进来的请求：等窗口建好再处理
+        if (g_hasPendingLaunch) PostMessageW(hWnd, WM_APP_LAUNCH, 0, 0);
         break;
     }
 
@@ -1233,9 +1270,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             // 主操作按钮使用强调色（加密/解密），其余使用标准按钮色
             const bool isPrimary = (ctlId == 1 || ctlId == 2);
+            const bool isDelete = (ctlId == 3);
 
             COLORREF fill, textColor, borderColor;
-            if (isPrimary) {
+            if (isDelete && g_dropOnDelete) {
+                // 有文件正拖在按钮上：用危险色高亮，配合「松开删除」文案
+                fill = c.danger;
+                textColor = c.onAccent;
+                borderColor = c.danger;
+            }
+            else if (isPrimary) {
                 fill = isPressed ? c.accentPressed : UiBlend(c.accent, c.accentHover, hover);
                 textColor = c.onAccent;
                 borderColor = fill;
@@ -1338,11 +1382,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         if (files.empty()) break;
 
-        if (g_workerRunning) {
-            ShowUiMessage(hWnd, UiIcon::Info, tr(L"提示", L"Notice"),
-                          tr(L"已有任务正在运行，请稍候。", L"A task is already running; please wait."), false);
-            break;
-        }
+        // 注意：这里**不再**拦截“已有任务正在运行”。
+        // 再次创建任务会进入队列，由 worker 顺序处理，进度条下方显示“已完成 x / y”。
 
         // 检测文件类型：是否包含 .enc（加密文件）或普通文件
         bool hasEnc = false, hasPlain = false;
@@ -1367,6 +1408,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         std::vector<Protection> perFileProts;      // 与 perFilePasswords 同序
         Protection prot_single;
 
+        // 诱饵（可否认加密）只对单文件提供：批量时若每个文件各配一份，交互过重
+        std::wstring decoyFile;
+        std::string  decoyPwd;
         if (hasEnc) {
             // ---- 解密：每个文件独立走「锁定检查 -> 校验 -> 扣减 -> 重试」 ----
             if (files.size() == 1) {
@@ -1437,7 +1481,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // ---- 加密：密码框里可以同时配置防暴力破解策略 ----
             if (files.size() == 1) {
                 // 单文件加密：要求确认密码
-                if (!CollectEncryptPassword(hWnd, files[0], pwd_single, prot_single, true)) {
+                if (!CollectEncryptPassword(hWnd, files[0], pwd_single, prot_single, true,
+                                            !Settings().decoyDisabled, &decoyFile, &decoyPwd)) {
                     SetStatusText(tr(L"已取消", L"Cancelled"));
                     break;
                 }
@@ -1477,7 +1522,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         }
 
-        StartProcessing(files, perFilePasswords, pwd_single, perFileProts, prot_single);
+        StartProcessing(files, perFilePasswords, pwd_single, perFileProts, prot_single,
+                        decoyFile, decoyPwd);
         break;
     }
 
@@ -1491,10 +1537,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const int btnGap = UiPx(16);
         const int btnY = UiPx(kMainBtnY);
 
-        int btnX = (W - (btnW * 2 + btnGap)) / 2;
+        int btnX = (W - (btnW * 3 + btnGap * 2)) / 2;
         if (btnX < UiPx(12)) btnX = UiPx(12);
         if (g_hBtn1) SetWindowPos(g_hBtn1, NULL, btnX, btnY, btnW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
         if (g_hBtn2) SetWindowPos(g_hBtn2, NULL, btnX + btnW + btnGap, btnY, btnW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
+        if (g_hBtn3) SetWindowPos(g_hBtn3, NULL, btnX + (btnW + btnGap) * 2, btnY, btnW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
 
         const int pad = UiPx(24);
         (void)pad;
@@ -1524,21 +1571,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             UiFillRect(dc, rc, c.bg);
 
-            // 底部状态栏（自绘，跟随深浅色主题）
-            const int statusH = UiPx(28);
-            RECT statusRc = { 0, rc.bottom - statusH, rc.right, rc.bottom };
-            UiFillRect(dc, statusRc, c.bgAlt);
-            RECT line = { 0, statusRc.top, rc.right, statusRc.top + 1 };
-            UiFillRect(dc, line, c.border);
-
-            RECT textRc = { UiPx(12), statusRc.top, rc.right - UiPx(12), statusRc.bottom };
-            UiDrawTextLine(dc, g_statusText, textRc, UiFont(UiPx(13), false), c.textMuted,
-                           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-            // 自绘进度条：绿色填充 + 白色扫光 + 下方进度/预计剩余时间
+            // 自绘进度条：上方文件名 + 绿色填充/白色扫光 + 下方进度与队列计数
             if (g_progVisible) {
-                RECT bar = {}, info = {};
-                ProgressRects(rc, bar, info);
+                RECT fileRc = {}, bar = {}, info = {};
+                ProgressRects(rc, fileRc, bar, info);
+
+                // 进度条上方：当前文件名（不含路径，否则显示不全）
+                UiDrawTextLine(dc, g_progFileName, fileRc, UiFont(UiPx(13), false), c.text,
+                               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 // 顶点带一点点圆角即可，不要做成两端半圆
                 const int radius = UiPx(3);
 
@@ -1560,11 +1600,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                 (float)fill.left + g_sheenX * (float)fillW, halfW, 90);
                 }
 
-                // 下方文字：45% · 预计剩余 12 秒（覆写阶段则显示当前阶段）
+                // 下方左侧：45% · 预计剩余 12 秒
                 std::wstring line = std::to_wstring((int)(g_progShown + 0.5)) + L"%";
                 line += g_etaText;   // 始终只显示预计时间（覆写阶段同样按总工作量推算）
                 UiDrawTextLine(dc, line, info, UiFont(UiPx(13), false), c.textMuted,
                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                // 下方右侧：任务队列计数（只有多于一个任务时才显示）
+                // 总数必须把“正在执行的那个”也算上：它既不在队列里、也还没计入已完成
+                int pending = 0;
+                {
+                    std::lock_guard<std::mutex> lk(g_queueMutex);
+                    pending = (int)g_taskQueue.size();
+                }
+                const int done  = g_tasksDone.load();
+                const int total = done + g_taskRunning.load() + pending;
+                if (total > 1) {
+                    const std::wstring q = tr(L"已完成 ", L"done ")
+                                         + std::to_wstring(done)
+                                         + L" / " + std::to_wstring(total);
+                    UiDrawTextLine(dc, q, info, UiFont(UiPx(13), false), c.textMuted,
+                                   DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                }
             }
         }
 
@@ -1614,6 +1671,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         }
 
+        // 安全删除：选文件 -> 二次确认 -> 入队（与加解密共用批量/进度/托盘）
+        if (id == 3) {
+            SetStatusText(tr(L"请选择要安全删除的文件...", L"Select files to securely delete..."));
+            std::vector<std::wstring> picked = PickFilesForDelete(hWnd);
+            if (picked.empty()) {
+                SetStatusText(tr(L"已取消", L"Cancelled"));
+                break;
+            }
+            ConfirmAndSecureDelete(hWnd, std::move(picked));
+            break;
+        }
+
         if (id == 1 || id == 2) { // 加密 / 解密
             const bool encrypting = (id == 1);
             SetStatusText(encrypting ? tr(L"请选择要加密的文件...", L"Select a file to encrypt...")
@@ -1629,17 +1698,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 break;
             }
 
-            if (g_workerRunning) {
-                ShowUiMessage(hWnd, UiIcon::Info, tr(L"提示", L"Notice"),
-                              tr(L"已有任务正在运行，请稍候。", L"A task is already running; please wait."), false);
-                break;
-            }
+            // 同上：不再拦截，重复创建的任务进入队列
 
             std::string password;
             Protection prot;
+            std::wstring decoyFile2;
+            std::string  decoyPwd2;
             if (encrypting) {
-                // 加密：密码框里可以同时配置防暴力破解
-                if (!CollectEncryptPassword(hWnd, input_path, password, prot, true)) {
+                // 加密：密码框里可以同时配置防暴力破解；单文件可额外启用诱饵
+                // 设置里勾了「禁用诱饵文件」时不再提供诱饵选项（单槽写不下诱饵）
+                if (!CollectEncryptPassword(hWnd, input_path, password, prot, true,
+                                            !Settings().decoyDisabled, &decoyFile2, &decoyPwd2)) {
                     SetStatusText(tr(L"已取消", L"Cancelled"));
                     break;
                 }
@@ -1660,7 +1729,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
 
             // 放到后台线程执行，避免界面卡死（不再出现“无响应”）
-            StartProcessing({ input_path }, {}, password, {}, prot);
+            StartProcessing({ input_path }, {}, password, {}, prot, decoyFile2, decoyPwd2);
             break;
         }
 
@@ -1758,6 +1827,54 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     }
+    case WM_COPYDATA: {
+        // 另一个实例（右键菜单为每个文件各起一个进程）把清单转发过来
+        const COPYDATASTRUCT* cds = (const COPYDATASTRUCT*)lParam;
+        LaunchRequest req;
+        if (cds && cds->dwData == kLaunchCopyDataId &&
+            UnpackLaunch((const BYTE*)cds->lpData, cds->cbData, req) &&
+            !req.files.empty()) {
+            QueueLaunchFiles(hWnd, req.files, (int)req.kind);   // 等这一波进程到齐再一起处理
+            return TRUE;
+        }
+        return FALSE;
+    }
+    case WM_APP_LAUNCH: {
+        std::vector<std::wstring> files;
+        int kind = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_dropMutex);
+            files = std::move(g_pendingLaunch);
+            kind = g_pendingKind;
+        }
+        QueueLaunchFiles(hWnd, files, kind);   // 与转发的请求合并成一批
+        return 0;
+    }
+    case WM_APP_SECURE_DELETE_DROP: {
+        // 有文件被拖到「安全删除」按钮上并松开。清单由 Drop() 先存好再通知，
+        // 这里取出来走与按钮点击完全相同的确认流程。
+        std::vector<std::wstring> files;
+        {
+            std::lock_guard<std::mutex> lk(g_dropMutex);
+            files = std::move(g_droppedForDelete);
+            g_droppedForDelete.clear();
+        }
+        if (!files.empty()) ConfirmAndSecureDelete(hWnd, std::move(files));
+        return 0;
+    }
+    case WM_APP_QUEUE_CHANGED: {
+        InvalidateRect(hWnd, NULL, FALSE);
+        return 0;
+    }
+    case WM_APP_SET_FILE: {
+        LPWSTR msg = (LPWSTR)lParam;
+        if (msg) {
+            g_progFileName = msg;
+            delete[] msg;
+        }
+        InvalidateRect(hWnd, NULL, FALSE);
+        break;
+    }
     case WM_APP_SHOW_MESSAGE: {
         UiMessagePayload* payload = (UiMessagePayload*)lParam;
         if (payload) {
@@ -1798,6 +1915,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return HandleAskOutputPath(hWnd, lParam);
 
     case WM_TIMER: {
+        if (wParam == TIMER_LAUNCH_GROUP) {
+            // 这一波启动请求已经到齐：合并成一次确认、一个任务
+            KillTimer(hWnd, TIMER_LAUNCH_GROUP);
+            std::vector<std::wstring> files;
+            int kind = 0;
+            {
+                std::lock_guard<std::mutex> lk(g_dropMutex);
+                files = std::move(g_launchFiles);
+                g_launchFiles.clear();
+                kind = g_launchKind;
+            }
+            DispatchLaunch(hWnd, files, kind);
+            return 0;
+        }
         if (wParam == TIMER_BG_EXIT) {
             if (UiModalDepth() == 0) {   // 弹窗已关，可以退出了
                 KillTimer(hWnd, TIMER_BG_EXIT);
@@ -1910,9 +2041,14 @@ static std::wstring PasswordSubtitle(const std::wstring& file, size_t index, siz
 
 // 加密前收集密码；allowProtection 为真时在密码框里显示防暴力破解设置区。
 // 返回值即 uiProt 的内容，直接写进文件头。
+// allowDecoy 为真时（仅单文件加密）密码框里会多出「使用诱饵文件（可否认加密）」。
+// 勾选后依次让用户选诱饵文件、设假密码，两者都有效才写回 outDecoy*。
 static bool CollectEncryptPassword(HWND owner, const std::wstring& subtitle,
                                    std::string& outPwd, Protection& outProt,
-                                   bool allowProtection) {
+                                   bool allowProtection,
+                                   bool allowDecoy,
+                                   std::wstring* outDecoyFile,
+                                   std::string* outDecoyPwd) {
     // 默认值：保护关闭；勾选后默认 3 次 / 永久删除 / 锁定 7 天
     UiProtection ui;
     ui.enabled = false;
@@ -1920,13 +2056,40 @@ static bool CollectEncryptPassword(HWND owner, const std::wstring& subtitle,
     ui.action = 0;
     ui.lockDays = 7;
 
-    if (!ShowPasswordDialog(owner, outPwd, true, subtitle, allowProtection, &ui))
+    bool useDecoy = false;
+    if (!ShowPasswordDialog(owner, outPwd, true, subtitle, allowProtection, &ui,
+                            -1, allowDecoy, &useDecoy))
         return false;
 
     outProt.enabled = ui.enabled;
     outProt.maxTries = ui.maxTries;
     outProt.action = (ui.action == 1) ? ProtectionAction::Lock : ProtectionAction::Delete;
     outProt.lockDays = ui.lockDays;
+
+    if (allowDecoy && useDecoy && outDecoyFile && outDecoyPwd) {
+        const std::wstring decoy = OpenFileDialog(false);
+        if (decoy.empty()) return false;   // 用户取消了诱饵文件选择
+
+        std::string fake;
+        if (!ShowPasswordDialog(owner, fake, true,
+                                tr(L"设置假密码：被胁迫时交出的就是它",
+                                   L"Set the decoy password (the one you hand over)"),
+                                false, nullptr))
+            return false;
+        if (fake.empty()) {
+            ShowUiMessage(owner, UiIcon::Error, tr(L"无法使用诱饵", L"Decoy unavailable"),
+                          tr(L"假密码不能为空。", L"The decoy password cannot be empty."), true);
+            return false;
+        }
+        if (fake == outPwd) {
+            ShowUiMessage(owner, UiIcon::Error, tr(L"无法使用诱饵", L"Decoy unavailable"),
+                          tr(L"假密码不能与真密码相同，否则诱饵没有意义。",
+                             L"The decoy password must differ from the real one."), true);
+            return false;
+        }
+        *outDecoyFile = decoy;
+        *outDecoyPwd = fake;
+    }
     return true;
 }
 
@@ -1980,55 +2143,258 @@ static PwdCollect CollectDecryptPassword(HWND owner, const std::wstring& file,
     return PwdCollect::Ok;
 }
 
-// 在后台线程中处理文件队列，避免阻塞 UI 线程（消除“无响应”）
-static void StartProcessing(std::vector<std::wstring> files,
-                            std::vector<std::string> perFilePasswords,
-                            std::string singlePassword,
-                            std::vector<Protection> perFileProts,
-                            Protection singleProt) {
-    if (g_workerRunning.exchange(true)) {
-        ShowUiMessage(g_mainWnd, UiIcon::Info, tr(L"提示", L"Notice"),
-                      tr(L"已有任务正在运行，请稍候。", L"A task is already running; please wait."), false);
-        return;
-    }
+// ==================== 「安全删除」任务 ====================
+//
+// 与加解密共用同一个任务队列，所以批量处理、进度条、后台托盘、
+// 「已完成 x / y」队列计数全部自动具备，不需要另写一套。
+static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int passes) {
+    const bool english   = g_langEnglish;
+    // 显式点「安全删除」时至少要覆写一遍：0 在设置里表示"不删除"，
+    // 用在这里会让按钮名不副实。总工作量与实际写入必须用同一个值。
+    const int  usePasses = (passes > 0) ? passes : 1;
 
-    // 取一份设置快照：本次任务全程使用，中途改设置不影响正在进行的工作
-    const AppSettings& cfg = Settings();
-    const int iterations = StrengthIterations(cfg.strength);
-    const int deletePasses = (int)cfg.secureDelete;
-    const bool keepSource = (cfg.secureDelete == SecureDeleteMode::Off);   // 禁用 = 保留不删
-    const OutDirMode outMode = cfg.outDir;
-    const std::wstring fixedDir = cfg.fixedOutDir;
-    const CompletionMode completion = cfg.completion;
-    const bool english = g_langEnglish;
-    const size_t fileCount = files.size();
+    auto postStatus = [](const std::wstring& text) {
+        wchar_t* buf = new wchar_t[text.size() + 1];
+        wcscpy_s(buf, text.size() + 1, text.c_str());
+        PostMessageW(g_mainWnd, WM_APP_SET_STATUS, 0, (LPARAM)buf);
+    };
+    auto postFileName = [](const std::wstring& path) {
+        const size_t pos = path.find_last_of(L"\\/");
+        const std::wstring name = (pos == std::wstring::npos) ? path : path.substr(pos + 1);
+        wchar_t* buf = new wchar_t[name.size() + 1];
+        wcscpy_s(buf, name.size() + 1, name.c_str());
+        PostMessageW(g_mainWnd, WM_APP_SET_FILE, 0, (LPARAM)buf);
+    };
+    auto postMessage = [](UiIcon icon, const std::wstring& caption,
+                          const std::wstring& text, bool topmost) {
+        UiMessagePayload* payload = new UiMessagePayload();
+        payload->icon = icon;
+        payload->caption = caption;
+        payload->text = text;
+        payload->topmost = topmost;
+        PostMessageW(g_mainWnd, WM_APP_SHOW_MESSAGE, 0, (LPARAM)payload);
+    };
 
-    // 统计所有输入文件的总字节数，用于跨文件的整体进度。
-    // 加密后如果还要覆写删除源文件，那部分耗时同样计入总工作量——
-    // 否则大文件会在进度条到 100% 后长时间“卡住”（其实是在覆写）。
-    const bool encryptingTask = !(files.empty() ||
-        (files[0].size() >= 4 && files[0].substr(files[0].size() - 4) == L".enc"));
-    const uint64_t deleteMultiplier =
-        (encryptingTask && !keepSource && deletePasses > 0) ? (uint64_t)deletePasses : 0;
-
-    uint64_t totalBytes = 0;
+    // 先把每个文件的工作量算出来：进度必须走完整的"开始文件 / 结束文件"生命周期，
+    // 否则 g_progDoneBytes 永远不推进 —— 表现为删完一个卡在 100%，
+    // 下一个又从 0% 开始（因为没有 ProgressEndFile 把它计入已完成）。
+    std::vector<uint64_t> perFileBytes;
+    perFileBytes.reserve(files.size());
+    uint64_t total = 0;
     for (const auto& f : files) {
+        uint64_t sz = 0;
         HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             LARGE_INTEGER li = {};
-            if (GetFileSizeEx(h, &li) && li.QuadPart > 0)
-                totalBytes += (uint64_t)li.QuadPart * (1 + deleteMultiplier);
+            if (GetFileSizeEx(h, &li) && li.QuadPart > 0) sz = (uint64_t)li.QuadPart;
             CloseHandle(h);
         }
+        // 工作量 = 文件大小 × 覆写次数（与 fe::SecureDeleteFile 上报的字节口径一致）
+        perFileBytes.push_back(sz * (uint64_t)usePasses);
+        total += perFileBytes.back();
+    }
+    ProgressReset(total);
+    PostMessageW(g_mainWnd, WM_APP_SHOW_PROGRESS, 1, 0);
+
+    int okCount = 0;
+    std::wstring failedList;
+    for (size_t i = 0; i < files.size(); ++i) {
+        const std::wstring& f = files[i];
+        ProgressBeginFile(perFileBytes[i]);   // 缺了这句 g_progFileTotal 就是 0
+        postFileName(f);
+        postStatus(english ? L"Securely deleting..." : L"正在安全删除...");
+        try {
+            SecureDeleteFile(f, usePasses, [](uint64_t n) { ProgressAdd(n); });
+            ++okCount;
+        }
+        catch (const std::exception&) {
+            failedList += f + L"\n";
+        }
+        ProgressEndFile();                    // 缺了这句进度永远不跨文件累加
     }
 
-    ProgressReset(totalBytes);
-    ShowProgressBar(true);   // 所有文件都显示进度条（不再按大小判断）
+    // 收尾：对齐到 100% 并隐藏进度条（加解密路径也是这么做的）。
+    // 少了它进度条会一直停在 100% 不消失。
+    ProgressFinish();
 
-    std::thread worker([files, perFilePasswords, singlePassword, english, fileCount,
-                        iterations, deletePasses, keepSource, outMode, fixedDir, completion,
-                        perFileProts, singleProt]() mutable {
+    if (failedList.empty()) {
+        postStatus(english ? L"Done" : L"完成");
+        const std::wstring text = english
+            ? (L"Securely deleted " + std::to_wstring(okCount) + L" file(s).")
+            : (L"已安全删除 " + std::to_wstring(okCount) + L" 个文件。");
+        postMessage(UiIcon::Info, english ? L"Done" : L"完成", text, true);
+    }
+    else {
+        postStatus(english ? L"Partially failed" : L"部分失败");
+        const std::wstring text =
+            (english ? L"The following files could not be deleted:\n\n"
+                     : L"以下文件删除失败：\n\n") + failedList;
+        postMessage(UiIcon::Error, english ? L"Failed" : L"失败", text, true);
+    }
+}
+
+// 把任务放进队列，并在没有 worker 时启动一个。
+// 加解密与安全删除共用它 —— 这是三者（批量 / 进度条 / 后台托盘）行为一致的保证。
+static void EnqueueAndRun(TaskRequest task);
+
+// 加解密任务
+static void StartProcessing(std::vector<std::wstring> files,
+                            std::vector<std::string> perFilePasswords,
+                            std::string singlePassword,
+                            std::vector<Protection> perFileProts,
+                            Protection singleProt,
+                            std::wstring decoyFile,
+                            std::string  decoyPwd) {
+    if (files.empty()) return;
+
+    TaskRequest task;
+    task.files = std::move(files);
+    task.perFilePasswords = std::move(perFilePasswords);
+    task.singlePassword = std::move(singlePassword);
+    task.perFileProts = std::move(perFileProts);
+    task.singleProt = singleProt;
+    task.decoyFile = std::move(decoyFile);
+    task.decoyPwd = std::move(decoyPwd);
+    EnqueueAndRun(std::move(task));
+}
+
+// 安全删除任务：只需文件列表 + 覆写次数
+static void StartSecureDelete(std::vector<std::wstring> files, int passes) {
+    if (files.empty()) return;
+    TaskRequest task;
+    task.files = std::move(files);
+    task.isSecureDelete = true;
+    task.deletePasses = passes;
+    EnqueueAndRun(std::move(task));
+}
+
+// 安全删除前的二次确认。
+// 删除不可撤销，无论从按钮还是拖放进来都必须先过这一关。
+static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> files) {
+    if (files.empty()) return;
+
+    const bool english = g_langEnglish;
+    // 显式删除至少覆写一遍（设置里的 0 表示"加密后不删源文件"，用在这里没有意义）
+    const int configured = (int)Settings().secureDelete;
+    const int passes = (configured > 0) ? configured : 1;
+
+    std::wstring text;
+    if (files.size() == 1) {
+        const size_t pos = files[0].find_last_of(L"\\/");
+        const std::wstring name = (pos == std::wstring::npos) ? files[0] : files[0].substr(pos + 1);
+        text = english
+            ? (L"Securely delete this file?\n\n" + name +
+               L"\n\nIt will be overwritten " + std::to_wstring(passes) +
+               L" time(s) and then deleted. This cannot be undone.")
+            : (L"确定要安全删除这个文件吗？\n\n" + name +
+               L"\n\n将覆写 " + std::to_wstring(passes) +
+               L" 次后删除，此操作不可恢复。");
+    }
+    else {
+        text = english
+            ? (L"Securely delete these " + std::to_wstring(files.size()) +
+               L" files?\n\nEach will be overwritten " + std::to_wstring(passes) +
+               L" time(s) and then deleted. This cannot be undone.")
+            : (L"确定要安全删除这 " + std::to_wstring(files.size()) +
+               L" 个文件吗？\n\n每个将覆写 " + std::to_wstring(passes) +
+               L" 次后删除，此操作不可恢复。");
+    }
+
+    UiMessage m;
+    m.icon = UiIcon::Warning;
+    m.caption = english ? L"Confirm secure delete" : L"确认安全删除";
+    m.text = text;
+    m.buttons = MB_YESNO;
+    m.topmost = true;
+    if (UiShowMessage(owner, m) != IDYES) return;
+
+    StartSecureDelete(std::move(files), passes);
+}
+
+static void EnqueueAndRun(TaskRequest task) {
+    // 入队。已有 worker 在跑时**不再报错**，交给它按顺序处理后续任务。
+    bool needStart = false;
+    {
+        // 入队与「由谁负责跑」的判定必须在同一把锁内。
+        // 否则会出现竞态：worker 刚判空准备收工，任务刚好入队，
+        // 于是新任务以为"已有 worker 会处理"，而 worker 已经退出 —— 任务永远不执行。
+        std::lock_guard<std::mutex> lk(g_queueMutex);
+        g_taskQueue.push_back(std::move(task));
+        if (!g_workerRunning.exchange(true)) needStart = true;
+    }
+    if (g_mainWnd) PostMessageW(g_mainWnd, WM_APP_QUEUE_CHANGED, 0, 0);
+    if (!needStart) return;   // 已有 worker：它会接着取队列
+
+    std::thread worker([]() {
+      for (;;) {
+        TaskRequest req;
+        {
+            std::lock_guard<std::mutex> lk(g_queueMutex);
+            if (g_taskQueue.empty()) {
+                // 判空与清除运行标志同锁，杜绝上述竞态
+                g_workerRunning = false;
+                g_tasksDone = 0;    // 一批任务全部结束，计数清零
+                break;
+            }
+            req = std::move(g_taskQueue.front());
+            g_taskQueue.pop_front();
+        }
+        g_taskRunning = 1;   // 开始执行：总数里要算上它
+
+        std::vector<std::wstring> files            = std::move(req.files);
+        const bool                isSecureDelete   = req.isSecureDelete;
+        const int                 reqDeletePasses  = req.deletePasses;
+        std::vector<std::string>  perFilePasswords = std::move(req.perFilePasswords);
+        const std::string         singlePassword   = std::move(req.singlePassword);
+        std::vector<Protection>   perFileProts     = std::move(req.perFileProts);
+        const Protection          singleProt       = req.singleProt;
+        const std::wstring        decoyFile        = std::move(req.decoyFile);
+        const std::string         decoyPwd         = std::move(req.decoyPwd);
+
+        // ---- 「安全删除」任务：与加解密完全分开的一条路径 ----
+        if (isSecureDelete) {
+            RunSecureDeleteTask(files, reqDeletePasses);
+            g_taskRunning = 0;
+            g_tasksDone++;
+            if (g_mainWnd) PostMessageW(g_mainWnd, WM_APP_QUEUE_CHANGED, 0, 0);
+            continue;
+        }
+
+        // 设置快照在每个任务开始时重读 —— 所以设置改动对“下一个任务”生效，
+        // 语言与主题则由设置对话框立即应用。
+        const AppSettings& cfg = Settings();
+        const int iterations = StrengthIterations(cfg.strength);
+        const int deletePasses = (int)cfg.secureDelete;
+        const bool keepSource = cfg.keepSource;   // 独立的「保留源文件」开关
+        const OutDirMode outMode = cfg.outDir;
+        const std::wstring fixedDir = cfg.fixedOutDir;
+        const CompletionMode completion = cfg.completion;
+        const bool english = g_langEnglish;
+        const size_t fileCount = files.size();
+
+        // 统计所有输入文件的总字节数，用于跨文件的整体进度。
+        // 加密后如果还要覆写删除源文件，那部分耗时同样计入总工作量——
+        // 否则大文件会在进度条到 100% 后长时间“卡住”（其实是在覆写）。
+        const bool encryptingTask = !(files.empty() ||
+            (files[0].size() >= 4 && files[0].substr(files[0].size() - 4) == L".enc"));
+        const uint64_t deleteMultiplier =
+            (encryptingTask && !keepSource && deletePasses > 0) ? (uint64_t)deletePasses : 0;
+
+        uint64_t totalBytes = 0;
+        for (const auto& f : files) {
+            HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h != INVALID_HANDLE_VALUE) {
+                LARGE_INTEGER li = {};
+                if (GetFileSizeEx(h, &li) && li.QuadPart > 0)
+                    totalBytes += (uint64_t)li.QuadPart * (1 + deleteMultiplier);
+                CloseHandle(h);
+            }
+        }
+
+        ProgressReset(totalBytes);
+        ShowProgressBar(true);   // 所有文件都显示进度条（不再按大小判断）
         std::vector<std::wstring> failures;
         size_t processed = 0;
 
@@ -2036,6 +2402,14 @@ static void StartProcessing(std::vector<std::wstring> files,
             wchar_t* buf = new wchar_t[text.size() + 1];
             wcscpy_s(buf, text.size() + 1, text.c_str());
             PostMessageW(g_mainWnd, WM_APP_SET_STATUS, 0, (LPARAM)buf);
+        };
+        // 进度条上方显示的文件名：只取文件名，带路径会显示不全
+        auto postFileName = [](const std::wstring& path) {
+            const size_t pos = path.find_last_of(L"\\/");
+            const std::wstring name = (pos == std::wstring::npos) ? path : path.substr(pos + 1);
+            wchar_t* buf = new wchar_t[name.size() + 1];
+            wcscpy_s(buf, name.size() + 1, name.c_str());
+            PostMessageW(g_mainWnd, WM_APP_SET_FILE, 0, (LPARAM)buf);
         };
         auto postMessage = [](UiIcon icon, const std::wstring& caption,
                               const std::wstring& text, bool topmost) {
@@ -2051,13 +2425,9 @@ static void StartProcessing(std::vector<std::wstring> files,
             const std::wstring& f = files[idx];
             const bool isEnc = (f.size() >= 4 && f.substr(f.size() - 4) == L".enc");
 
-            const std::wstring prefix = isEnc
-                ? (english ? L"Decrypting: " : L"正在解密: ")
-                : (english ? L"Encrypting: " : L"正在加密: ");
-            const int overallPercent = (int)(100.0 * (double)idx / (double)(fileCount ? fileCount : 1));
-            postStatus(prefix + f +
-                       (english ? L"  (overall " : L"  (整体进度 ") +
-                       std::to_wstring(overallPercent) + L"%)");
+            // 进度条上方只显示文件名（不再显示整条路径），整体进度由下方“已完成 x / y”体现
+            (void)isEnc;
+            postFileName(f);
 
             std::string usePwd;
             if (!perFilePasswords.empty()) {
@@ -2095,7 +2465,13 @@ static void StartProcessing(std::vector<std::wstring> files,
                     Protection prot = singleProt;
                     if (!perFileProts.empty() && idx < perFileProts.size())
                         prot = perFileProts[idx];
-                    FileEncryptor::encryptFileTo(f, out_path, usePwd, iterations, prot);
+                    // 诱饵只在单文件任务里收集，批量时 decoyFile 为空
+                    // 设置里勾了「禁用诱饵文件」时只写一个槽，体积回到约 1 倍
+                    const bool singleSlot = Settings().decoyDisabled;
+                    FileEncryptor::encryptFileTo(f, out_path, usePwd, iterations, prot,
+                                                 singleSlot ? std::wstring() : decoyFile,
+                                                 singleSlot ? std::string() : decoyPwd,
+                                                 singleSlot);
                     // 源文件含明文，按设置覆写 N 次后删除；“禁用”= 保留不删。
                     // 覆写大文件很耗时，必须上报进度并切换阶段文案，
                     // 否则进度条会一直停在 100% 让人以为卡死。
@@ -2132,6 +2508,15 @@ static void StartProcessing(std::vector<std::wstring> files,
         }
 
         ProgressFinish();
+
+        g_taskRunning = 0;
+        g_tasksDone++;
+        if (g_mainWnd) PostMessageW(g_mainWnd, WM_APP_QUEUE_CHANGED, 0, 0);
+        {
+            // 重新在锁内确认一次：任务执行期间可能又有新任务入队
+            std::lock_guard<std::mutex> lk(g_queueMutex);
+            if (!g_taskQueue.empty()) continue;   // 还有排队任务：跳过“完成后行为”
+        }
 
         if (!failures.empty()) {
             std::wstring body;
@@ -2183,12 +2568,12 @@ static void StartProcessing(std::vector<std::wstring> files,
             postMessage(UiIcon::Info, english ? L"Success" : L"成功", text, true);
         }
 
-        g_workerRunning = false;
+      }   // for (;;) 任务队列循环（g_workerRunning 已在锁内清除）
 
-        // 用户之前选择“后台运行”：任务结束后自动退出（进度条已关闭，这里再关窗口）
-        if (g_runInBackground && g_mainWnd) {
-            PostMessageW(g_mainWnd, WM_APP_BACKGROUND_DONE, 0, 0);
-        }
+      // 用户之前选择“后台运行”：任务结束后自动退出（进度条已关闭，这里再关窗口）
+      if (g_runInBackground && g_mainWnd) {
+          PostMessageW(g_mainWnd, WM_APP_BACKGROUND_DONE, 0, 0);
+      }
     });
     worker.detach();
 }
@@ -2204,6 +2589,9 @@ static void ShowSettingsDialog(HWND owner) {
     d.secureDelete = (int)s.secureDelete;
     d.completion   = (int)s.completion;
     d.strength     = (int)s.strength;
+    d.decoyDisabled = s.decoyDisabled ? 1 : 0;
+    d.keepSource   = s.keepSource ? 1 : 0;
+    d.shellMenu    = s.shellMenu ? 1 : 0;
 
     if (!UiShowSettings(owner, d)) return;
 
@@ -2212,10 +2600,16 @@ static void ShowSettingsDialog(HWND owner) {
     w.theme        = (ThemeMode)d.theme;
     w.outDir       = (OutDirMode)d.outDir;
     w.fixedOutDir  = d.fixedDir;
-    w.secureDelete = (SecureDeleteMode)d.secureDelete;
+    w.secureDelete = d.secureDelete;
     w.completion   = (CompletionMode)d.completion;
     w.strength     = (StrengthMode)d.strength;
+    w.decoyDisabled = (d.decoyDisabled != 0);
+    w.keepSource = (d.keepSource != 0);
+    w.shellMenu  = (d.shellMenu != 0);
     SettingsSave();
+
+    // 右键菜单开关立即生效（勾选就注册、取消就删除）
+    ApplyShellMenuSetting();
 
     // 立即生效：语言 + 主题
     g_langEnglish = (w.language == LangMode::English);
@@ -2246,6 +2640,142 @@ static LRESULT HandleAskOutputPath(HWND hWnd, LPARAM lParam) {
 }
 
 // ---------- 主入口：使用 WinMain (纯 GUI 应用，不创建控制台) ----------
+// ==================== 资源管理器右键菜单支持 ====================
+//
+// 右键菜单用 MultiSelectModel=Player：Explorer 会**每个选中的文件启动一个进程**。
+// 所以必须做单实例 —— 第一个进程建窗口，后面的把自己的文件清单转发过去再退出。
+// 这样批量、进度条、后台托盘、队列计数全都自然复用，不需要另写一套。
+//
+// 菜单由 HKCU\Software\Classes\*\shell 注册（不需要管理员权限）。
+
+// 解析命令行：FileEncryptor.exe --encrypt|--secure-delete <文件...>
+static LaunchRequest ParseLaunchArgs() {
+    LaunchRequest req;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return req;
+    for (int i = 1; i < argc; ++i) {
+        const std::wstring a = argv[i];
+        if (a == L"--encrypt")            req.kind = LaunchKind::Encrypt;
+        else if (a == L"--secure-delete") req.kind = LaunchKind::SecureDelete;
+        else if (!a.empty() && a[0] != L'-') req.files.push_back(a);
+    }
+    LocalFree(argv);
+    return req;
+}
+
+// 打包成 WM_COPYDATA 用的扁平缓冲：[int kind][int count][路径\0][路径\0]...
+static std::vector<BYTE> PackLaunch(const LaunchRequest& r) {
+    std::vector<BYTE> buf;
+    const int kind = (int)r.kind;
+    const int count = (int)r.files.size();
+    const BYTE* k = (const BYTE*)&kind;
+    const BYTE* c = (const BYTE*)&count;
+    buf.insert(buf.end(), k, k + sizeof(kind));
+    buf.insert(buf.end(), c, c + sizeof(count));
+    for (const auto& f : r.files) {
+        const BYTE* p = (const BYTE*)f.c_str();
+        buf.insert(buf.end(), p, p + (f.size() + 1) * sizeof(wchar_t));
+    }
+    return buf;
+}
+
+static bool UnpackLaunch(const BYTE* data, DWORD size, LaunchRequest& out) {
+    if (!data || size < sizeof(int) * 2) return false;
+    int kind = 0, count = 0;
+    memcpy(&kind, data, sizeof(kind));
+    memcpy(&count, data + sizeof(int), sizeof(count));
+    out.kind = (LaunchKind)kind;
+    out.files.clear();
+
+    size_t off = sizeof(int) * 2;
+    for (int i = 0; i < count && off + sizeof(wchar_t) <= size; ++i) {
+        const wchar_t* s = (const wchar_t*)(data + off);
+        const size_t maxChars = (size - off) / sizeof(wchar_t);
+        size_t len = 0;
+        while (len < maxChars && s[len]) ++len;
+        out.files.push_back(std::wstring(s, len));
+        off += (len + 1) * sizeof(wchar_t);
+    }
+    return true;
+}
+
+// 注册 / 更新右键菜单（幂等；每次启动都跑一遍，
+// 这样即使 exe 被移动过，菜单里的路径也会自动纠正）
+static void RegisterShellMenu() {
+    wchar_t exe[MAX_PATH * 2] = {};
+    if (!GetModuleFileNameW(NULL, exe, _countof(exe))) return;
+
+    struct Verb { const wchar_t* key; const wchar_t* zh; const wchar_t* en; const wchar_t* arg; };
+    const Verb verbs[] = {
+        { L"FileEncryptor.Encrypt",      L"用FileEncryptor加密",     L"Encrypt with FileEncryptor",      L"--encrypt" },
+        { L"FileEncryptor.SecureDelete", L"用FileEncryptor安全删除", L"Securely delete with FileEncryptor", L"--secure-delete" },
+    };
+
+    const bool english = (Settings().language == LangMode::English);
+    for (const Verb& v : verbs) {
+        const std::wstring base = std::wstring(L"Software\\Classes\\*\\shell\\") + v.key;
+
+        HKEY hk = NULL;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, base.c_str(), 0, NULL, 0,
+                            KEY_WRITE, NULL, &hk, NULL) == ERROR_SUCCESS) {
+            const wchar_t* title = english ? v.en : v.zh;
+            RegSetValueExW(hk, NULL, 0, REG_SZ, (const BYTE*)title,
+                           (DWORD)((wcslen(title) + 1) * sizeof(wchar_t)));
+            // 图标
+            const std::wstring icon = std::wstring(exe) + L",0";
+            RegSetValueExW(hk, L"Icon", 0, REG_SZ, (const BYTE*)icon.c_str(),
+                           (DWORD)((icon.size() + 1) * sizeof(wchar_t)));
+            // Player：每个文件单独启动一次进程（不限制数量），靠单实例转发汇总
+            const wchar_t* model = L"Player";
+            RegSetValueExW(hk, L"MultiSelectModel", 0, REG_SZ, (const BYTE*)model,
+                           (DWORD)((wcslen(model) + 1) * sizeof(wchar_t)));
+            RegCloseKey(hk);
+
+            const std::wstring cmdKey = base + L"\\command";
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, cmdKey.c_str(), 0, NULL, 0,
+                                KEY_WRITE, NULL, &hk, NULL) == ERROR_SUCCESS) {
+                const std::wstring cmd = std::wstring(L"\"") + exe + L"\" " + v.arg + L" \"%1\"";
+                RegSetValueExW(hk, NULL, 0, REG_SZ, (const BYTE*)cmd.c_str(),
+                               (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+                RegCloseKey(hk);
+            }
+        }
+    }
+}
+
+// 删除已注册的右键菜单项
+static void UnregisterShellMenu() {
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\*\\shell\\FileEncryptor.Encrypt");
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\*\\shell\\FileEncryptor.SecureDelete");
+}
+
+// 按设置注册或注销右键菜单。启动时与设置保存后各调一次。
+static void ApplyShellMenuSetting() {
+    if (Settings().shellMenu) RegisterShellMenu();
+    else                      UnregisterShellMenu();
+}
+
+// 把请求转发给已在运行的实例；成功返回 true
+static bool ForwardToExisting(const LaunchRequest& req) {
+    if (req.files.empty() || req.kind == LaunchKind::None) return false;
+    const std::vector<BYTE> buf = PackLaunch(req);
+
+    // 第一个实例可能还在建窗口，重试几秒（右键多选时会同时冒出多个进程）
+    for (int i = 0; i < 60; ++i) {
+        HWND h = FindWindowW(L"FileEncryptorGUI", NULL);
+        if (h) {
+            COPYDATASTRUCT cds = {};
+            cds.dwData = kLaunchCopyDataId;
+            cds.cbData = (DWORD)buf.size();
+            cds.lpData = (void*)buf.data();
+            if (SendMessageW(h, WM_COPYDATA, 0, (LPARAM)&cds)) return true;
+        }
+        Sleep(100);
+    }
+    return false;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
     (void)hPrevInstance; (void)lpCmdLine; // 未使用的参数
 
@@ -2265,6 +2795,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // 读取设置并应用语言 / 主题
     SettingsLoad();
     g_langEnglish = (Settings().language == LangMode::English);
+
+    // ---- 资源管理器右键菜单：命令行请求 + 单实例转发 ----
+    const LaunchRequest launch = ParseLaunchArgs();
+
+    HANDLE hSingle = CreateMutexW(NULL, TRUE, L"FileEncryptor.SingleInstance");
+    const bool isFirstInstance = (hSingle != NULL && GetLastError() != ERROR_ALREADY_EXISTS);
+    if (!isFirstInstance && launch.kind != LaunchKind::None) {
+        // 已有实例在跑：把文件交过去，自己立刻退出
+        if (ForwardToExisting(launch)) return 0;
+        // 转发失败（对方还没建好窗口）就自己当第一个实例继续
+    }
+
+    // 菜单项标题跟随语言，且每次启动都刷新，exe 移动过也能自动纠正；
+    // 设置里关掉时会顺手把已注册的菜单项删掉
+    ApplyShellMenuSetting();
+
+    if (launch.kind != LaunchKind::None && !launch.files.empty()) {
+        g_pendingLaunch = launch.files;
+        g_pendingKind = (int)launch.kind;
+        g_hasPendingLaunch = true;
+    }
 
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(icex);

@@ -1,4 +1,4 @@
-// Wrapper for WinUI password dialog. If WINUI_AVAILABLE is not defined, falls back to existing Win32 dialog.
+﻿// Wrapper for WinUI password dialog. If WINUI_AVAILABLE is not defined, falls back to existing Win32 dialog.
 #pragma once
 
 #include <windows.h>
@@ -13,4 +13,6 @@ bool ShowPasswordDialogWinUI(HWND parent, std::string& password, bool confirm,
                              const std::wstring& subtitle = std::wstring(),
                              bool showProtection = false,
                              UiProtection* ioProt = nullptr,
-                             int remainTries = -1);
+                             int remainTries = -1,
+                             bool showDecoy = false,
+                             bool* ioUseDecoy = nullptr);

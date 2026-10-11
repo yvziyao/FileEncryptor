@@ -9,7 +9,9 @@
 
 bool ShowPasswordDialogWinUI(HWND parent, std::string& password, bool confirm,
                              const std::wstring& subtitle, bool showProtection,
-                             UiProtection* ioProt, int remainTries) {
+                             UiProtection* ioProt, int remainTries,
+                             bool showDecoy, bool* ioUseDecoy) {
 	return UiShowPassword(parent, confirm, password, subtitle,
-	                      showProtection, ioProt, remainTries);
+	                      showProtection, ioProt, remainTries,
+	                      showDecoy, ioUseDecoy);
 }

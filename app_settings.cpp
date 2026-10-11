@@ -71,12 +71,16 @@ void SettingsLoad() {
     s.fixedOutDir  = RegGetString(L"OutDir");
     s.completion   = ClampEnum<CompletionMode>(RegGetDword(L"Completion", 1), 1, CompletionMode::ShowDialog);
 
-    const DWORD sd = RegGetDword(L"SecureDelete", 3);
-    if (sd == 0)      s.secureDelete = SecureDeleteMode::Off;
-    else if (sd == 1) s.secureDelete = SecureDeleteMode::Overwrite1;
-    else              s.secureDelete = SecureDeleteMode::Overwrite3;
+    // 覆写次数夹到 1-10
+    DWORD sd = RegGetDword(L"SecureDelete", 3);
+    if (sd < 1)  sd = 1;
+    if (sd > 10) sd = 10;
+    s.secureDelete = (int)sd;
+    s.keepSource = RegGetDword(L"KeepSource", 0) != 0;
+    s.shellMenu = RegGetDword(L"ShellMenu", 1) != 0;
 
     s.strength = ClampEnum<StrengthMode>(RegGetDword(L"Strength", 1), 3, StrengthMode::Standard);
+    s.decoyDisabled = RegGetDword(L"DecoyDisabled", 0) != 0;
 }
 
 void SettingsSave() {
@@ -88,6 +92,9 @@ void SettingsSave() {
     RegSetDword(L"SecureDelete", (DWORD)s.secureDelete);
     RegSetDword(L"Completion", (DWORD)s.completion);
     RegSetDword(L"Strength", (DWORD)s.strength);
+    RegSetDword(L"DecoyDisabled", s.decoyDisabled ? 1 : 0);
+    RegSetDword(L"KeepSource", s.keepSource ? 1 : 0);
+    RegSetDword(L"ShellMenu", s.shellMenu ? 1 : 0);
 }
 
 int StrengthIterations(StrengthMode s) {
@@ -135,11 +142,11 @@ std::wstring OutDirName(OutDirMode d) {
     return std::wstring();
 }
 
-std::wstring SecureDeleteName(SecureDeleteMode d) {
-    switch (d) {
-    case SecureDeleteMode::Off:        return tr(L"禁用", L"Off");
-    case SecureDeleteMode::Overwrite1: return tr(L"覆写 1 次", L"1 pass");
-    case SecureDeleteMode::Overwrite3: return tr(L"覆写 3 次", L"3 passes");
+std::wstring SecureDeleteName(int passes) {
+    switch (passes) {
+    case 0:  return tr(L"不删除", L"Keep");
+    case 1:  return tr(L"覆写 1 次", L"1 pass");
+    case 3:  return tr(L"覆写 3 次", L"3 passes");
     }
     return std::wstring();
 }

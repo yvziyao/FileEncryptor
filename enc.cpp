@@ -1,4 +1,4 @@
-﻿// enc.cpp
+// enc.cpp
 // 极简命令行文件加密工具（加密/解密、指定输出目录、可控安全删除）
 //
 // 源码为 UTF-8（带 BOM），保证在任何 ANSI 代码页的机器上都能正确编译。
@@ -12,12 +12,12 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#define OPENSSL_API_COMPAT 0x10100000L
 
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/err.h>
-#include <openssl/hmac.h>
+#include "file_format.h"   // 文件格式的唯一定义（与 GUI 共用）
+#include "file_crypto.h"   // 加解密核心的唯一实现（与 GUI 共用）
+using namespace fe;
+using fe::PutU16; using fe::PutU32; using fe::PutU64;
+using fe::GetU16; using fe::GetU32; using fe::GetU64;
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -171,293 +171,51 @@ std::string get_password(const std::string& prompt, bool confirm, const std::str
 }
 // ---------- 工具函数 ----------
 
-// 只支持当前格式（v2）。历史格式（v1 / 最旧的 CBC）已不再读取。
-//
-//   0  magic[8]      "FENC\r\n\x1a\n"
-//   8  version[1]    = 2
-//   9  flags[1]      bit0 启用保护, bit1 模式(0=永久删除, 1=限时锁定)
-//  10  iterations[4] LE   PBKDF2-HMAC-SHA256 迭代次数（即“加密强度”）
-//  14  maxTries[2]   LE   允许的错误尝试次数
-//  16  lockDays[2]   LE   限时锁定模式下的锁定时长（天）
-//  18  salt[16]
-//  34  iv[12]         GCM 推荐 96-bit nonce
-//  46  verifier[8]    HMAC-SHA256(key, label) 前 8 字节，用于快速校验密码
-//  54  remaining[2]   LE   ← 可变（每次解密失败 -1）
-//  56  lockUntil[8]   LE   ← 可变（Unix 秒，0 = 未锁定）
-//  64  ciphertext[N]  与明文等长（GCM 为流模式，无填充）
-//  末尾 tag[16]       GCM 认证标签
-//
-// 偏移 8..54 作为 GCM 的 AAD 参与认证：salt/IV/迭代次数/保护策略一旦被改动，
-// 解密会直接认证失败——攻击者无法「关掉保护」。
-// 偏移 54..64 必须在没有正确密码时也能改写，所以不参与认证，
-// 这也意味着理论上可以被重置（详见 README 的安全说明）。
-static const unsigned char kMagic[8] = { 'F', 'E', 'N', 'C', '\r', '\n', 0x1A, '\n' };
-static const size_t kSaltLen = 16;
-static const size_t kIvLen = 12;
-static const size_t kTagLen = 16;
-static const size_t kHeaderLenV2 = 64;
+// 文件格式（magic / 头部布局 / 偏移 / 标志位 / AAD 范围 / verifier 标签）
+// 统一定义在 file_format.h，CLI 与 GUI 共用一份 —— 避免两份实现漂移。
 
-static const size_t kAadOff = 8;
-static const size_t kAadLen = 46;      // 8..54
-static const size_t kRemOff = 54;      // 剩余次数 [2]
-static const size_t kLockOff = 56;     // 锁定截止 [8]
-
-static const uint8_t kFlagProtected = 0x01;
-static const uint8_t kFlagModeLock = 0x02;
-
-static const char kVerifyLabel[] = "FileEncryptor/v2/verify";
-
-enum ExhaustAction { EXHAUST_DELETE = 0, EXHAUST_LOCK = 1 };
-
-// 加密时写入文件的保护策略
-struct Protection {
-    bool enabled = false;
-    int  maxTries = 3;                       // 1..9999
-    int  action = EXHAUST_DELETE;
-    int  lockDays = 7;                       // 0..3650
-};
-
-// 从文件头读出的保护状态
-struct FileState {
-    bool     isProtected = false;
-    int      action = EXHAUST_DELETE;
-    int      maxTries = 0;
-    int      remaining = 0;
-    int      lockDays = 0;
-    uint64_t lockUntil = 0;                  // Unix 秒，0 = 未锁定
-};
-
+// 加密强度 -> PBKDF2 迭代次数（CLI 专有，不属于共享格式）
 enum Strength { STRENGTH_FAST = 0, STRENGTH_STANDARD = 1, STRENGTH_SECURE = 2, STRENGTH_EXTREME = 3 };
 
 int strength_iterations(int strength) {
     switch (strength) {
-    case STRENGTH_FAST:    return 50000;
+    case STRENGTH_FAST:     return 50000;
     case STRENGTH_STANDARD: return 100000;
-    case STRENGTH_SECURE:  return 300000;
-    case STRENGTH_EXTREME: return 600000;
+    case STRENGTH_SECURE:   return 300000;
+    case STRENGTH_EXTREME:  return 600000;
     }
     return 100000;
 }
+// ---------------- 与共用实现的适配层 ----------------
+// 真正的逻辑在 file_crypto.cpp（CLI 与 GUI 共用一份）。
+// 这里只做 UTF-8 路径 -> 宽字符的转换和名字映射，避免调用点到处改。
 
-void put_u16(std::vector<uint8_t>& v, uint16_t x) {
-    v.push_back((uint8_t)(x & 0xFF));
-    v.push_back((uint8_t)((x >> 8) & 0xFF));
-}
-void put_u32(std::vector<uint8_t>& v, uint32_t x) {
-    v.push_back((uint8_t)(x & 0xFF));
-    v.push_back((uint8_t)((x >> 8) & 0xFF));
-    v.push_back((uint8_t)((x >> 16) & 0xFF));
-    v.push_back((uint8_t)((x >> 24) & 0xFF));
-}
-void put_u64(std::vector<uint8_t>& v, uint64_t x) {
-    for (int i = 0; i < 8; ++i) v.push_back((uint8_t)((x >> (8 * i)) & 0xFF));
-}
-uint16_t get_u16(const uint8_t* p) {
-    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
-}
-uint32_t get_u32(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-uint64_t get_u64(const uint8_t* p) {
-    uint64_t v = 0;
-    for (int i = 0; i < 8; ++i) v |= ((uint64_t)p[i]) << (8 * i);
-    return v;
+static bool ReadFileState(const std::string& path, FileState& st) {
+    return fe::ReadProtState(Utf8ToWide(path), st);
 }
 
-std::vector<uint8_t> derive_key(const std::string& password, const std::vector<uint8_t>& salt, int iterations) {
-    std::vector<uint8_t> key(32);
-    if (PKCS5_PBKDF2_HMAC(password.c_str(), (int)password.length(),
-        salt.data(), (int)salt.size(),
-        iterations,
-        EVP_sha256(),
-        (int)key.size(),
-        key.data()) != 1) {
-        throw std::runtime_error("密钥派生失败");
-    }
-    return key;
+static bool WriteMutableState(const std::string& path, int remaining, uint64_t lockUntil) {
+    return fe::WriteMutableState(Utf8ToWide(path), remaining, lockUntil);
 }
 
-// 密码验证标签：让「密码对不对」只需 PBKDF2 + 一次 HMAC，
-// 不必为了判断密码而把整个密文过一遍（GUI 的重试循环依赖这一点）。
-std::vector<uint8_t> VerifierOf(const std::vector<uint8_t>& key) {
-    unsigned char mac[EVP_MAX_MD_SIZE] = {};
-    unsigned int macLen = 0;
-    if (HMAC(EVP_sha256(), key.data(), (int)key.size(),
-             (const unsigned char*)kVerifyLabel, sizeof(kVerifyLabel) - 1,
-             mac, &macLen) == nullptr) {
-        throw std::runtime_error("计算验证标签失败");
-    }
-    return std::vector<uint8_t>(mac, mac + 8);
+static int ConsumeAttempt(const std::string& path, const FileState& st, std::string& outMsg) {
+    return fe::ConsumeAttempt(Utf8ToWide(path), st, outMsg);
 }
 
-uint64_t NowUnix() {
-    return (uint64_t)std::time(nullptr);
-}
+enum VerifyOutcome { VERIFY_OK, VERIFY_WRONG, VERIFY_UNAVAILABLE };
 
-// 读取文件头的保护状态。返回 false 表示不是有效的 v2 加密文件。
-bool ReadFileState(const std::string& path, FileState& st) {
-    std::ifstream f(PathOf(path), std::ios::binary);
-    if (!f) return false;
-    uint8_t head[kHeaderLenV2] = {};
-    f.read((char*)head, kHeaderLenV2);
-    if (f.gcount() != (std::streamsize)kHeaderLenV2) return false;
-    if (std::memcmp(head, kMagic, 8) != 0) return false;
-    if (head[8] != 2) return false;
-
-    const uint8_t flags = head[9];
-    st.isProtected = (flags & kFlagProtected) != 0;
-    st.action = (flags & kFlagModeLock) ? EXHAUST_LOCK : EXHAUST_DELETE;
-    st.maxTries = (int)get_u16(&head[14]);
-    st.lockDays = (int)get_u16(&head[16]);
-    st.remaining = (int)get_u16(&head[kRemOff]);
-    st.lockUntil = get_u64(&head[kLockOff]);
-    return true;
-}
-
-// 只改写文件头中的可变部分（剩余次数 / 锁定截止），不动密文。
-// 这两个字段不在 AAD 内，所以改写不会破坏认证。
-bool WriteMutableState(const std::string& path, int remaining, uint64_t lockUntil) {
-    std::fstream f(PathOf(path), std::ios::in | std::ios::out | std::ios::binary);
-    if (!f) return false;
-    uint8_t buf[10];
-    buf[0] = (uint8_t)(remaining & 0xFF);
-    buf[1] = (uint8_t)((remaining >> 8) & 0xFF);
-    for (int i = 0; i < 8; ++i) buf[2 + i] = (uint8_t)((lockUntil >> (8 * i)) & 0xFF);
-    f.seekp((std::streamoff)kRemOff, std::ios::beg);
-    f.write((char*)buf, sizeof(buf));
-    f.flush();
-    return f.good();
-}
-
-// 格式化剩余时长
-std::string FormatDuration(uint64_t seconds) {
-    const uint64_t days = seconds / 86400;
-    const uint64_t hours = (seconds % 86400) / 3600;
-    const uint64_t mins = (seconds % 3600) / 60;
-    std::string s;
-    if (days > 0)  s += std::to_string(days) + " 天 ";
-    if (hours > 0) s += std::to_string(hours) + " 小时 ";
-    if (days == 0 && mins > 0) s += std::to_string(mins) + " 分钟";
-    if (s.empty()) s = "不到 1 分钟";
-    // 去掉结尾空格
-    while (!s.empty() && s.back() == ' ') s.pop_back();
-    return s;
-}
-
-// 一次解密失败之后调用：扣减次数，必要时执行后果。
-// 返回扣减后的剩余次数；remaining <= 0 表示已经用尽。
-// outMsg 会写入给用户看的说明。
-int ConsumeAttempt(const std::string& path, const FileState& st, std::string& outMsg) {
-    if (!st.isProtected) return -1;
-
-    // 之前已锁定且尚未到期，不重复扣减
-    if (st.lockUntil != 0 && NowUnix() < st.lockUntil) {
-        outMsg = "已锁定，剩余 " + FormatDuration(st.lockUntil - NowUnix());
-        return 0;
-    }
-
-    int remaining = st.remaining - 1;
-    if (remaining < 0) remaining = 0;
-
-    if (remaining > 0) {
-        WriteMutableState(path, remaining, 0);
-        outMsg = "还可尝试 " + std::to_string(remaining) + " 次";
-        return remaining;
-    }
-
-    // 用尽
-    if (st.action == EXHAUST_LOCK) {
-        const uint64_t until = NowUnix() + (uint64_t)st.lockDays * 86400ULL;
-        WriteMutableState(path, 0, until);
-        outMsg = "错误次数已达上限，已禁止解密 " + std::to_string(st.lockDays) + " 天";
-        return 0;
-    }
-
-    // 永久删除
-    std::error_code ec;
-    fs::remove(PathOf(path), ec);
-    outMsg = "错误次数已达上限，加密文件已被永久删除";
-    return 0;
-}
-
-enum VerifyResult { VERIFY_OK, VERIFY_WRONG, VERIFY_UNAVAILABLE };
-
-// 快速校验密码：只读文件头，做一次 PBKDF2 + 一次 HMAC，不解密正文。
-// 只有能读到合法 v2 文件头时才可用，否则返回 VERIFY_UNAVAILABLE。
-VerifyResult VerifyPassword(const std::string& path, const std::string& password, FileState& st) {
-    if (!ReadFileState(path, st)) return VERIFY_UNAVAILABLE;
-
-    std::ifstream f(PathOf(path), std::ios::binary);
-    if (!f) return VERIFY_UNAVAILABLE;
-    uint8_t hdr[kHeaderLenV2] = {};
-    f.read((char*)hdr, kHeaderLenV2);
-    if (f.gcount() != (std::streamsize)kHeaderLenV2) return VERIFY_UNAVAILABLE;
-
-    const int iterations = (int)get_u32(&hdr[10]);
-    if (iterations < 1000 || iterations > 10000000) return VERIFY_UNAVAILABLE;
-
-    std::vector<uint8_t> salt(kSaltLen);
-    std::memcpy(salt.data(), &hdr[18], kSaltLen);
-
-    auto key = derive_key(password, salt, iterations);
-    auto expect = VerifierOf(key);
-
-    uint8_t diff = 0;
-    for (size_t i = 0; i < expect.size(); ++i) diff |= (uint8_t)(expect[i] ^ hdr[46 + i]);
-    return diff == 0 ? VERIFY_OK : VERIFY_WRONG;
-}
-
-// 删除文件。passes = 0 时直接删除（密文无明文残留，无需覆写）；
-// passes >= 1 时先用随机数据覆写 N 遍再删除（明文源文件用）。
-void secure_delete(const std::string& path, int passes) {
-    if (passes <= 0) {
-        std::error_code ec;
-        fs::remove(PathOf(path), ec);
-        return;
-    }
-    try {
-        fs::path file_path = PathOf(path);
-        if (!fs::exists(file_path)) return;
-        
-        size_t file_size = fs::file_size(file_path);
-        if (file_size == 0) {
-            fs::remove(file_path);
-            return;
-        }
-
-        std::fstream file(PathOf(path), std::ios::in | std::ios::out | std::ios::binary);
-        if (!file) {
-            fs::remove(file_path);
-            return;
-        }
-
-        const size_t CHUNK = 4096;
-        std::vector<uint8_t> buf(CHUNK);
-        
-        for (int pass = 0; pass < passes; ++pass) {
-            file.seekp(0, std::ios::beg);
-            size_t remaining = file_size;
-            while (remaining > 0) {
-                size_t to_write = std::min(CHUNK, remaining);
-                if (RAND_bytes(buf.data(), (int)to_write) != 1) {
-                    std::fill(buf.begin(), buf.begin() + to_write, (uint8_t)(pass + 1));
-                }
-                if (pass % 2 == 1) {
-                    for (size_t i = 0; i < to_write; ++i) buf[i] = ~buf[i];
-                }
-                file.write((char*)buf.data(), to_write);
-                remaining -= to_write;
-            }
-            file.flush();
-        }
-        file.close();
-        fs::remove(file_path);
-    } catch (...) {
-        std::error_code ec;
-        fs::remove(path, ec);
+static VerifyOutcome VerifyPassword(const std::string& path, const std::string& password,
+                                   FileState& st) {
+    switch (fe::VerifyPassword(Utf8ToWide(path), password, st)) {
+    case fe::VerifyResult::Ok:            return VERIFY_OK;
+    case fe::VerifyResult::WrongPassword: return VERIFY_WRONG;
+    default:                              return VERIFY_UNAVAILABLE;
     }
 }
 
+static void secure_delete(const std::string& path, int passes) {
+    fe::SecureDeleteFile(Utf8ToWide(path), passes);
+}
 void show_progress(uint64_t current, uint64_t total) {
     const int bar_width = 50;
     double progress = (double)current / total;
@@ -476,201 +234,24 @@ void show_progress(uint64_t current, uint64_t total) {
 // ---------- 加密核心（AES-256-GCM）----------
 void encrypt_file(const std::string& input_path, const std::string& output_path,
                   const std::string& password, int iterations,
-                  const Protection& prot = Protection()) {
-    const size_t CHUNK = 4 * 1024 * 1024;
-
-    std::vector<uint8_t> salt(kSaltLen), iv(kIvLen);
-    if (RAND_bytes(salt.data(), (int)salt.size()) != 1)
-        throw std::runtime_error("生成salt失败");
-    if (RAND_bytes(iv.data(), (int)iv.size()) != 1)
-        throw std::runtime_error("生成IV失败");
-
-    auto key = derive_key(password, salt, iterations);
-    auto verifier = VerifierOf(key);
-
-    std::ifstream in_file(PathOf(input_path), std::ios::binary);
-    if (!in_file) throw std::runtime_error("无法打开输入文件");
-
-    std::ofstream out_file(PathOf(output_path), std::ios::binary);
-    if (!out_file) throw std::runtime_error("无法创建输出文件");
-
-    // ---- v2 文件头 ----
-    std::vector<uint8_t> header;
-    header.reserve(kHeaderLenV2);
-    header.insert(header.end(), kMagic, kMagic + 8);
-    header.push_back(2);                                   // version
-    header.push_back(prot.enabled
-        ? (uint8_t)(kFlagProtected | (prot.action == EXHAUST_LOCK ? kFlagModeLock : 0))
-        : (uint8_t)0);                                     // flags
-    put_u32(header, (uint32_t)iterations);
-    put_u16(header, (uint16_t)(prot.enabled ? prot.maxTries : 0));
-    put_u16(header, (uint16_t)(prot.enabled && prot.action == EXHAUST_LOCK ? prot.lockDays : 0));
-    header.insert(header.end(), salt.begin(), salt.end());
-    header.insert(header.end(), iv.begin(), iv.end());
-    header.insert(header.end(), verifier.begin(), verifier.end());
-    put_u16(header, (uint16_t)(prot.enabled ? prot.maxTries : 0));   // remaining = maxTries
-    put_u64(header, 0);                                              // lockUntil
-    out_file.write((char*)header.data(), header.size());
-
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) throw std::runtime_error("创建加密上下文失败");
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)kIvLen, nullptr) != 1 ||
-        EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.data(), iv.data()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("AES初始化失败");
-    }
-
-    // AAD：把版本/标志/迭代次数/策略参数/salt/IV 一起纳入认证。
-    // 攻击者若改动这些字段（例如把“启用保护”改成 0），认证会失败，文件也就解不开了。
-    {
-        int aadOut = 0;
-        if (EVP_EncryptUpdate(ctx, nullptr, &aadOut,
-                              header.data() + kAadOff, (int)kAadLen) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            throw std::runtime_error("写入AAD失败");
-        }
-    }
-
-    uint64_t total_size = fs::file_size(PathOf(input_path));
-    uint64_t processed = 0;
-
-    std::vector<uint8_t> inbuf(CHUNK), outbuf(CHUNK + 32);
-    while (in_file.read((char*)inbuf.data(), CHUNK) || in_file.gcount() > 0) {
-        int bytes_read = (int)in_file.gcount();
-        int outlen = 0;
-        if (EVP_EncryptUpdate(ctx, outbuf.data(), &outlen, inbuf.data(), bytes_read) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            throw std::runtime_error("加密失败");
-        }
-        out_file.write((char*)outbuf.data(), outlen);
-        processed += bytes_read;
-        show_progress(processed, total_size);
-    }
-
-    int outlen = 0;
-    if (EVP_EncryptFinal_ex(ctx, outbuf.data(), &outlen) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("完成加密失败");
-    }
-    if (outlen > 0) out_file.write((char*)outbuf.data(), outlen);
-
-    uint8_t tag[kTagLen] = {};
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, (int)kTagLen, tag) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("获取认证标签失败");
-    }
-    out_file.write((char*)tag, kTagLen);
-
-    // 循环里最后一次 show_progress 已经到 100%，这里不再重复打印进度条
+                  const Protection& prot = Protection(),
+                  const std::string& decoy_path = std::string(),
+                  const std::string& decoy_password = std::string(),
+                  bool single_slot = false) {
+    fe::ProgressFn prog = [](uint64_t cur, uint64_t total) { show_progress(cur, total); };
+    const std::wstring decoyW = decoy_path.empty() ? std::wstring() : Utf8ToWide(decoy_path);
+    fe::EncryptFileTo(Utf8ToWide(input_path), Utf8ToWide(output_path),
+                      password, iterations, prot, decoyW, decoy_password, prog, single_slot);
     std::cout << std::endl;
-
-    EVP_CIPHER_CTX_free(ctx);
-    in_file.close();
-    out_file.close();
-    // 源文件的删除策略由 main() 决定（-k 保留 / -w 控制覆写次数）
+    // 源文件的删除策略由 main() 决定（-k 保留 / -w 覆写次数）
 }
 
-// ---------- 解密核心（自动识别 v1 / v2 / 旧 CBC 格式）----------
-void decrypt_file(const std::string& input_path, const std::string& output_path, const std::string& password) {
-    const size_t CHUNK = 4 * 1024 * 1024;
-
-    std::ifstream in_file(PathOf(input_path), std::ios::binary);
-    if (!in_file) throw std::runtime_error("无法打开加密文件");
-
-    uint64_t file_size = fs::file_size(PathOf(input_path));
-
-    // 只认 v2 格式：固定 64 字节文件头，AAD 一律读取
-    uint8_t hdr[kHeaderLenV2] = {};
-    in_file.read((char*)hdr, kHeaderLenV2);
-    if (in_file.gcount() != (std::streamsize)kHeaderLenV2)
-        throw std::runtime_error("不是有效的加密文件（文件过小或已被截断）");
-    if (std::memcmp(hdr, kMagic, 8) != 0)
-        throw std::runtime_error("不是有效的加密文件（文件标识不匹配）");
-    if (hdr[8] != 2)
-        throw std::runtime_error("不支持的加密文件版本");
-
-    const int iterations = (int)get_u32(&hdr[10]);
-    if (iterations < 1000 || iterations > 10000000)
-        throw std::runtime_error("文件头中的迭代次数非法");
-
-    std::vector<uint8_t> salt(kSaltLen), iv(kIvLen);
-    std::memcpy(salt.data(), &hdr[18], kSaltLen);
-    std::memcpy(iv.data(), &hdr[34], kIvLen);
-
-    uint8_t aad[kAadLen] = {};
-    std::memcpy(aad, &hdr[kAadOff], kAadLen);
-
-    const uint64_t overhead = (uint64_t)kHeaderLenV2 + kTagLen;
-    if (file_size <= overhead) throw std::runtime_error("加密文件不完整");
-    const uint64_t cipher_len = file_size - overhead;
-
-    auto key = derive_key(password, salt, iterations);
-
-    std::ofstream out_file(PathOf(output_path), std::ios::binary);
-    if (!out_file) throw std::runtime_error("无法创建输出文件");
-
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) throw std::runtime_error("创建解密上下文失败");
-    {
-        int aadOut = 0;
-        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)kIvLen, nullptr) != 1 ||
-            EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.data(), iv.data()) != 1 ||
-            EVP_DecryptUpdate(ctx, nullptr, &aadOut, aad, (int)kAadLen) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            throw std::runtime_error("AES初始化失败");
-        }
-    }
-
-    // 失败时清理半成品输出
-    auto fail = [&](const char* msg) -> void {
-        EVP_CIPHER_CTX_free(ctx);
-        out_file.close();
-        std::error_code ec;
-        fs::remove(PathOf(output_path), ec);
-        throw std::runtime_error(msg);
-    };
-
-    uint64_t remaining = cipher_len;
-    uint64_t processed = 0;
-    std::vector<uint8_t> inbuf(CHUNK), outbuf(CHUNK + 32);
-    while (remaining > 0) {
-        size_t want = (size_t)std::min<uint64_t>(CHUNK, remaining);
-        in_file.read((char*)inbuf.data(), want);
-        std::streamsize got = in_file.gcount();
-        if (got <= 0) fail("读取加密文件失败");
-        int outlen = 0;
-        if (EVP_DecryptUpdate(ctx, outbuf.data(), &outlen, inbuf.data(), (int)got) != 1)
-            fail("解密失败");
-        out_file.write((char*)outbuf.data(), outlen);
-        remaining -= (uint64_t)got;
-        processed += (uint64_t)got;
-        show_progress(processed, cipher_len);
-    }
-
-    int outlen = 0;
-    {
-        uint8_t tag[kTagLen] = {};
-        in_file.read((char*)tag, kTagLen);
-        if (in_file.gcount() != (std::streamsize)kTagLen) fail("读取认证标签失败");
-        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, (int)kTagLen, tag) != 1)
-            fail("设置认证标签失败");
-        if (EVP_DecryptFinal_ex(ctx, outbuf.data(), &outlen) != 1)
-            fail("认证失败：密码错误或文件已被篡改");
-    }
-    if (outlen > 0) out_file.write((char*)outbuf.data(), outlen);
-
-    // 循环里最后一次 show_progress 已经到 100%，这里不再重复打印进度条
+void decrypt_file(const std::string& input_path, const std::string& output_path,
+                  const std::string& password) {
+    fe::ProgressFn prog = [](uint64_t cur, uint64_t total) { show_progress(cur, total); };
+    fe::DecryptFileTo(Utf8ToWide(input_path), Utf8ToWide(output_path), password, prog);
     std::cout << std::endl;
-
-    EVP_CIPHER_CTX_free(ctx);
-    in_file.close();
-    out_file.close();
-    // 加密文件的删除策略由 main() 决定（-k 保留）
 }
-
-// ---------- 主函数 ----------
 void print_usage(const char* prog_name) {
     std::cout << "用法: " << prog_name << " -e|-d -i <输入文件> [选项]" << std::endl;
     std::cout << "  -e            加密模式" << std::endl;
@@ -680,9 +261,18 @@ void print_usage(const char* prog_name) {
     std::cout << "  -p <密码>     密码（可选）。如不提供，会交互式输入" << std::endl;
     std::cout << "  -s <强度>     加密强度：fast|standard|secure|extreme（默认 standard）" << std::endl;
     std::cout << "                对应 PBKDF2 迭代次数 5万 / 10万 / 30万 / 60万" << std::endl;
-    std::cout << "  -w <次数>     删除前覆写次数：0=直接删除，1/3=覆写次数（默认 3）" << std::endl;
+    std::cout << "  -w <次数>     源文件处理：0=保留源文件（等同 -k），1-10=删除前覆写次数（默认 3）" << std::endl;
     std::cout << "  -k, --keep    保留源文件（加密时）/ 加密文件（解密时），不做删除" << std::endl;
-    std::cout << "                说明：解密后的加密文件不含明文残留，始终直接删除，不覆写" << std::endl;
+    std::cout << "                说明：解密后的加密文件不含明文残留，删除时不覆写" << std::endl;
+    std::cout << "  --decoy <文件>      可否认加密：指定诱饵文件" << std::endl;
+    std::cout << "  --decoy-pass <密码> 可否认加密：假密码，用它解密得到的是诱饵文件" << std::endl;
+    std::cout << "                      两者必须同时给出；受胁迫时交出假密码即可" << std::endl;
+    std::cout << "                      真实内容进哪个槽是随机的，文件本身看不出哪个是诱饵" << std::endl;
+    std::cout << "  --no-decoy          只写一个槽，文件体积约 1 倍" << std::endl;
+    std::cout << "                      代价：体积会暴露「没有诱饵」，不可否认性减弱" << std::endl;
+    std::cout << "安全删除（只删文件，不加密也不解密）:" << std::endl;
+    std::cout << "  --delete, -D <文件...>  用随机数据覆写后删除；可一次给多个文件" << std::endl;
+    std::cout << "                      覆写次数由 -w 决定（0=直接删除不覆写）" << std::endl;
     std::cout << "防暴力破解（仅加密时写入文件头）:" << std::endl;
     std::cout << "  -t, --max-tries <次数>   启用保护：允许的错误尝试次数（1-9999）" << std::endl;
     std::cout << "  -x, --on-exhaust <动作>  次数用尽后：delete=永久删除文件（默认）," << std::endl;
@@ -692,6 +282,8 @@ void print_usage(const char* prog_name) {
     std::cout << "  交互式加密: " << prog_name << " -e -i secret.txt" << std::endl;
     std::cout << "  命令行加密: " << prog_name << " -e -i secret.txt -p mypass" << std::endl;
     std::cout << "  高强度加密: " << prog_name << " -e -i secret.txt -p mypass -s extreme" << std::endl;
+    std::cout << "  安全删除文件: " << prog_name << " --delete secret.txt" << std::endl;
+    std::cout << "  安全删除多个: " << prog_name << " --delete a.txt b.txt c.txt -w 3" << std::endl;
     std::cout << "  输出到指定目录: " << prog_name << " -e -i secret.txt -p mypass -o D:\\Encrypted" << std::endl;
     std::cout << "  保留源文件: " << prog_name << " -e -i secret.txt -p mypass -k" << std::endl;
     std::cout << "  错 3 次即永久删除: " << prog_name << " -e -i secret.txt -p mypass -t 3" << std::endl;
@@ -706,8 +298,7 @@ int main(int argc, char* argv[]) {
     ConsoleUtf8Scope console_utf8;
     (void)console_utf8;
 #endif
-    OpenSSL_add_all_algorithms();
-    ERR_load_crypto_strings();
+    // 密码学运算已改用 Windows CNG（bcrypt），无需 OpenSSL 初始化
     
     std::string mode, input_file, password, out_dir;
     bool pwd_provided = false;
@@ -715,6 +306,12 @@ int main(int argc, char* argv[]) {
     int strength = STRENGTH_STANDARD;
     int overwrite_passes = 3;
     Protection prot;
+    // 可否认加密：诱饵文件 + 假密码
+    std::string decoy_file, decoy_password;
+    bool decoy_pwd_provided = false;
+    bool single_slot = false;   // --no-decoy：只写一个槽，体积约 1 倍
+    // 安全删除模式（--delete）的文件列表：支持一次删多个
+    std::vector<std::string> delete_files;
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = ArgToUtf8(argv[i]);
@@ -765,13 +362,21 @@ int main(int argc, char* argv[]) {
             try {
                 overwrite_passes = std::stoi(s);
             } catch (...) {
-                std::cerr << "错误：-w 需要一个整数（0=直接删除，1/3=覆写次数）" << std::endl;
+                std::cerr << "错误：-w 需要一个整数（0=保留源文件，1/3=覆写次数）" << std::endl;
                 return 1;
             }
             if (overwrite_passes < 0 || overwrite_passes > 10) {
                 std::cerr << "错误：-w 取值范围为 0-10（推荐 0 / 1 / 3）" << std::endl;
                 return 1;
             }
+        } else if ((arg == "--decoy" || arg == "--decoy-file") && i + 1 < argc) {
+            decoy_file = ArgToUtf8(argv[++i]);
+        } else if (arg == "--decoy-pass" && i + 1 < argc) {
+            decoy_password = ArgToUtf8(argv[++i]);
+            decoy_pwd_provided = true;
+        } else if (arg == "--no-decoy" || arg == "--single-slot") {
+            // 只写一个槽：体积约 1 倍，但文件大小会暴露「没有诱饵」
+            single_slot = true;
         } else if (arg == "-s" && i + 1 < argc) {
             std::string s = ArgToUtf8(argv[++i]);
             if (s == "fast")          strength = STRENGTH_FAST;
@@ -782,6 +387,11 @@ int main(int argc, char* argv[]) {
                 std::cerr << "错误：未知强度 '" << s << "'（可选 fast|standard|secure|extreme）" << std::endl;
                 return 1;
             }
+        } else if (arg == "--delete" || arg == "-D") {
+            mode = "--delete";
+        } else if (!arg.empty() && arg[0] != '-' && mode == "--delete") {
+            // --delete 之后的位置参数一律当作要删除的文件（支持一次多个）
+            delete_files.push_back(arg);
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -792,11 +402,57 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    if (mode.empty() || input_file.empty()) {
+    if (mode.empty()) {
+        print_usage(argv[0]);
+        return 1;
+    }
+    // --delete 可以用位置参数给文件，所以不强制 -i
+    if (mode == "--delete") {
+        if (input_file.empty() && delete_files.empty()) {
+            print_usage(argv[0]);
+            return 1;
+        }
+    } else if (input_file.empty()) {
         print_usage(argv[0]);
         return 1;
     }
     
+    // ---- 安全删除模式：只删文件，不加密也不解密 ----
+    // 与 GUI 的「安全删除」是同一个实现（fe::SecureDeleteFile），
+    // 所以覆写次数、失败处理的行为完全一致。
+    if (mode == "--delete") {
+        if (!input_file.empty()) delete_files.insert(delete_files.begin(), input_file);
+
+        int okCount = 0, failCount = 0;
+        for (const std::string& f : delete_files) {
+            try {
+                // fe::SecureDeleteFile 对不存在的文件不会报错，这里先自己判断，
+                // 否则会把「没删到」也算成成功
+                std::error_code ec;
+                if (!fs::exists(PathOf(f), ec) || fs::is_directory(PathOf(f), ec)) {
+                    std::cerr << "错误：文件不存在或不是普通文件: " << f << std::endl;
+                    ++failCount;
+                    continue;
+                }
+                if (overwrite_passes > 0) {
+                    std::cout << "正在安全删除（覆写 " << overwrite_passes << " 次）: " << f << std::endl;
+                } else {
+                    std::cout << "正在删除: " << f << std::endl;
+                }
+                fe::SecureDeleteFile(Utf8ToWide(f), overwrite_passes);
+                ++okCount;
+            }
+            catch (const std::exception& e) {
+                std::cerr << "错误：删除失败 " << f << " —— " << e.what() << std::endl;
+                ++failCount;
+            }
+        }
+        std::cout << "完成：成功 " << okCount << " 个";
+        if (failCount > 0) std::cout << "，失败 " << failCount << " 个";
+        std::cout << std::endl;
+        return failCount > 0 ? 1 : 0;
+    }
+
     // 输出目录校验（-o）
     if (!out_dir.empty()) {
         std::error_code ec;
@@ -831,7 +487,30 @@ int main(int argc, char* argv[]) {
             std::cout << "加密文件: " << input_file << std::endl;
             // 如果提供了 -p，直接使用；否则交互式输入（加密需要确认）
             std::string final_pwd = get_password("输入密码: ", true, pwd_provided ? password : "");
-            encrypt_file(input_file, output, final_pwd, strength_iterations(strength), prot);
+
+            // 可否认加密：给了诱饵文件就必须给假密码，且两者都要
+            std::string final_decoy_pwd;
+            if (!decoy_file.empty()) {
+                if (!decoy_pwd_provided) {
+                    std::cerr << "错误：使用 --decoy 时必须同时提供 --decoy-pass（假密码）" << std::endl;
+                    return 1;
+                }
+                std::error_code dec;
+                if (!fs::exists(PathOf(decoy_file), dec)) {
+                    std::cerr << "错误：诱饵文件不存在" << std::endl;
+                    return 1;
+                }
+                if (decoy_password == final_pwd) {
+                    std::cerr << "错误：假密码不能与真密码相同" << std::endl;
+                    return 1;
+                }
+                final_decoy_pwd = decoy_password;
+                std::cout << "已启用可否认加密：被胁迫时可交出假密码，解出的是诱饵文件"
+                          << std::endl;
+            }
+
+            encrypt_file(input_file, output, final_pwd, strength_iterations(strength), prot,
+                         decoy_file, final_decoy_pwd, single_slot);
             if (prot.enabled) {
                 if (prot.action == EXHAUST_LOCK) {
                     std::cout << "防暴力破解：错误 " << prot.maxTries << " 次后禁止解密 "
@@ -840,8 +519,10 @@ int main(int argc, char* argv[]) {
                     std::cout << "防暴力破解：错误 " << prot.maxTries << " 次后永久删除文件" << std::endl;
                 }
             }
-            // 源文件含明文：-k 保留，否则按 -w 覆写后删除
-            if (keep_source) {
+            // 源文件含明文。-k 与 -w 0 都表示保留：
+            // -w 0 对应 GUI 设置里的“禁用安全删除”，GUI 那边是保留源文件，
+            // 这里必须一致，否则同一个选项在两边行为不同。
+            if (keep_source || overwrite_passes == 0) {
                 std::cout << "加密成功，源文件已保留。输出文件: " << output << std::endl;
             } else {
                 secure_delete(input_file, overwrite_passes);
@@ -881,7 +562,7 @@ int main(int argc, char* argv[]) {
                     const std::string tryPwd = pwd_provided ? password : get_password(prompt, false, "");
 
                     FileState cur = st;
-                    const VerifyResult vr = VerifyPassword(input_file, tryPwd, cur);
+                    const VerifyOutcome vr = VerifyPassword(input_file, tryPwd, cur);
                     if (vr == VERIFY_OK) { final_pwd = tryPwd; break; }
 
                     std::string msg;
@@ -898,8 +579,9 @@ int main(int argc, char* argv[]) {
             }
 
             decrypt_file(input_file, output, final_pwd);
-            // 加密文件本身是密文、不含明文残留，因此不做覆写，直接删除（与 GUI 一致）
-            if (keep_source) {
+            // 加密文件本身是密文、不含明文残留，因此不做覆写，直接删除（与 GUI 一致）；
+            // 同样地，-k 或 -w 0 表示保留
+            if (keep_source || overwrite_passes == 0) {
                 std::cout << "解密成功，加密文件已保留。输出文件: " << output << std::endl;
             } else {
                 secure_delete(input_file, 0);

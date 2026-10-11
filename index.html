@@ -440,7 +440,7 @@
                 <p>基于 AES-256-GCM 与 PBKDF2 的流式文件加密工具。<br>支持加密强度、输出位置、删除策略与错误密码次数限制，为 Windows 提供简洁、安全、高效的文件加解密体验。</p>
             </div>
             <div id="desc-cli" class="version-desc" style="display: none;">
-                <p>极简命令行文件加密工具，支持 <code>-p</code> 传递密码、<code>-s</code> 指定加密强度、<code>-o</code> 指定输出目录、<code>-k</code> 保留源文件。<br>支持 Windows / Linux / macOS，与图形界面版本格式互通，适合服务器、远程环境或脚本集成。</p>
+                <p>极简命令行文件加密工具，支持 <code>-p</code> 传递密码、<code>-s</code> 指定加密强度、<code>-o</code> 指定输出目录、<code>-k</code> 保留源文件。<br>Windows x64 单文件无外部依赖（<strong>无需安装 OpenSSL</strong>），与图形界面版本格式互通，适合脚本与批量处理。</p>
             </div>
 
             <div id="download-gui" class="download-buttons active">
@@ -522,7 +522,7 @@
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-sliders-h"></i></div>
                     <h3>设置面板</h3>
-                    <p>语言、主题、输出位置、删除策略、完成后行为与加密强度，全部可视化配置。</p>
+                    <p>语言、主题、输出位置、安全删除覆写次数（1-10）、是否保留源文件、完成后行为与加密强度，全部可视化配置。</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-window-maximize"></i></div>
@@ -530,14 +530,24 @@
                     <p>WinUI 3 风格自绘界面，圆角控件、悬停与进度动画，支持浅色 / 深色 / 跟随系统主题。</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon"><i class="fas fa-shield-halved"></i></div>
+                    <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
+                    <h3>安全删除</h3>
+                    <p>与加密/解密并列的独立功能：可用随机数据覆写 1-10 次后再删除。支持批量、进度条、后台托盘，删除前一律二次确认。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-mouse-pointer"></i></div>
+                    <h3>右键菜单</h3>
+                    <p>资源管理器里右键文件即可「用FileEncryptor加密」或「用FileEncryptor安全删除」，多选同样是一批处理。注册在当前用户下，无需管理员权限。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-user-secret"></i></div>
                     <h3>防护机制</h3>
-                    <p>源文件可覆写删除防止恢复；可设置错误密码次数上限，用尽后永久删除文件或限时禁止解密。</p>
+                    <p>源文件可覆写删除防止恢复；可设置错误密码次数上限，用尽后永久删除文件或限时禁止解密；支持诱饵文件（可否认加密），被胁迫时可交出假密码解出诱饵。</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-box"></i></div>
                     <h3>完全便携</h3>
-                    <p>单 EXE 文件，无需额外 DLL，开箱即用。</p>
+                    <p>单 EXE 文件，无需额外 DLL，<strong>也不需要安装 OpenSSL</strong>——密码学全部使用 Windows 自带的 CNG。</p>
                 </div>
             </div>
         </div>
@@ -635,12 +645,12 @@
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
             <h3>防护机制</h3>
-            <p>加密后可用 <code>-w</code> 覆写删除源文件、<code>-k</code> 保留；<code>-t</code> 可设置错误密码次数上限，用尽后删除文件或限时禁止解密。</p>
+            <p>加密后可用 <code>-w</code> 覆写删除源文件、<code>-k</code> 保留；<code>-t</code> 可设置错误密码次数上限，用尽后删除文件或限时禁止解密；<code>--decoy</code> 可指定诱饵文件与假密码；<code>--no-decoy</code> 只写一个槽、体积减半。</p>
         </div>
         <div class="feature-card">
-            <div class="feature-icon"><i class="fas fa-globe"></i></div>
-            <h3>跨平台支持</h3>
-            <p>支持 Windows / Linux / macOS，一次编译，随处运行。</p>
+            <div class="feature-icon"><i class="fas fa-box"></i></div>
+            <h3>零依赖</h3>
+            <p>静态链接，单文件无外部依赖；密码学使用 Windows 自带的 CNG，<strong>无需安装 OpenSSL</strong>。仅支持 Windows。</p>
         </div>
     `;
 
@@ -658,7 +668,7 @@
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-sliders-h"></i></div>
             <h3>设置面板</h3>
-            <p>语言、主题、输出位置、删除策略、完成后行为与加密强度，全部可视化配置。</p>
+            <p>语言、主题、输出位置、安全删除覆写次数（1-10）、是否保留源文件、完成后行为与加密强度，全部可视化配置。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-window-maximize"></i></div>
@@ -667,13 +677,23 @@
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-trash-alt"></i></div>
+            <h3>安全删除</h3>
+            <p>与加密/解密并列的独立功能：可用随机数据覆写 1-10 次后再删除。支持批量、进度条、后台托盘，删除前一律二次确认。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-mouse-pointer"></i></div>
+            <h3>右键菜单</h3>
+            <p>资源管理器里右键文件即可「用FileEncryptor加密」或「用FileEncryptor安全删除」，多选同样是一批处理。注册在当前用户下，无需管理员权限。</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon"><i class="fas fa-user-secret"></i></div>
             <h3>防护机制</h3>
-            <p>源文件可覆写删除防止恢复；可设置错误密码次数上限，用尽后永久删除文件或限时禁止解密。</p>
+            <p>源文件可覆写删除防止恢复；可设置错误密码次数上限，用尽后永久删除文件或限时禁止解密；支持诱饵文件（可否认加密），被胁迫时可交出假密码解出诱饵。</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon"><i class="fas fa-box"></i></div>
             <h3>完全便携</h3>
-            <p>单 EXE 文件，无需额外 DLL，开箱即用。</p>
+            <p>单 EXE 文件，无需额外 DLL，<strong>也不需要安装 OpenSSL</strong>——密码学全部使用 Windows 自带的 CNG。</p>
         </div>
     `;
 
@@ -691,7 +711,7 @@
         if (version === 'gui') {
             detail.textContent = '单文件 · 无需安装 · WinUI 3 风格界面 · 深色模式';
         } else {
-            detail.textContent = '跨平台支持 · 与 GUI 格式互通 · 适合批量处理';
+            detail.textContent = '单文件 · 无外部依赖 · 与 GUI 格式互通 · 适合批量处理';
         }
     }
 
