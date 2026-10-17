@@ -413,9 +413,12 @@
         <nav>
             <div class="logo"><i class="fas fa-lock"></i><span>FileEncryptor</span></div>
             <div class="nav-links">
-                <a href="#features">功能</a>
-                <a href="#download">下载</a>
+                <a href="#features" data-i18n>功能</a>
+                <a href="#download" data-i18n>下载</a>
                 <a href="https://github.com/yvziyao/FileEncryptor" target="_blank" rel="noopener noreferrer"><i class="fab fa-github"></i> GitHub</a>
+                <button id="langToggle" class="lang-toggle" type="button" aria-label="Switch language">
+                    <span class="lang-zh active">中文</span><span class="lang-en">EN</span>
+                </button>
             </div>
         </nav>
     </div>
@@ -729,6 +732,186 @@
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') closeQR();
     });
+</script>
+
+<style>
+/* 导航栏右侧的中英文切换（胶囊样式） */
+.lang-toggle{
+    display:inline-flex; align-items:center; margin-left:10px; padding:2px;
+    border:1px solid rgba(128,128,128,.35); border-radius:999px;
+    background:rgba(128,128,128,.10); cursor:pointer; font:inherit; line-height:1;
+}
+.lang-toggle span{
+    padding:6px 14px; border-radius:999px; font-size:13px;
+    color:inherit; opacity:.65; transition:background .18s, opacity .18s;
+}
+.lang-toggle span.active{ background:#2563eb; color:#fff; opacity:1; }
+</style>
+
+<script>
+/* 中英切换：按文本内容查表替换文本节点。
+   不给每个标签加标记，是为了以后改文案时不用同步维护两份结构。 */
+(function () {
+    var DICT = {
+        "功能": "Features",
+        "下载": "Download",
+        "开源 · 安全 · 便携": "Open source · Secure · Portable",
+        "图形界面": "GUI",
+        "命令行": "CLI",
+        "基于 AES-256-GCM 与 PBKDF2 的流式文件加密工具。":
+            "A streaming file encryption tool built on AES-256-GCM and PBKDF2.",
+        "支持加密强度、输出位置、删除策略与错误密码次数限制，为 Windows 提供简洁、安全、高效的文件加解密体验。":
+            "Configurable strength, output location, deletion policy and wrong-password limits — a simple, secure, fast encryption experience on Windows.",
+        "极简命令行文件加密工具，支持": "A minimal command-line encryption tool supporting",
+        "传递密码、": "password passing,",
+        "指定加密强度、": "strength selection,",
+        "指定输出目录、": "output folder,",
+        "保留源文件。": "and keeping the source file.",
+        "Windows x64 单文件无外部依赖（": "Windows x64 single binary with no external dependencies (",
+        "无需安装 OpenSSL": "no OpenSSL required",
+        "），与图形界面版本格式互通，适合脚本与批量处理。":
+            "), format-compatible with the GUI, ideal for scripts and batch jobs.",
+        "一键下载（推荐）": "One-click download (recommended)",
+        "GitHub 下载": "Download from GitHub",
+        "百度网盘下载 (提取码:xx8u)": "Baidu Netdisk (code: xx8u)",
+        "百度网盘下载 (提取码: xx8u)": "Baidu Netdisk (code: xx8u)",
+        "单文件 · 无需安装 · WinUI 3 风格界面 · 深色模式":
+            "Single file · No install · WinUI 3 style UI · Dark mode",
+        "单文件 · 无外部依赖 · 与 GUI 格式互通 · 适合批量处理":
+            "Single file · No dependencies · Compatible with GUI · Built for batch",
+        "安全提示": "Security notice",
+        "采用 AES-256-GCM 认证加密，密文自带认证标签。加密后可按设置覆写删除源文件；解密后的加密文件不含明文残留，直接删除即可，也可选择保留。":
+            "AES-256-GCM authenticated encryption: the ciphertext carries its own auth tag. The source can be overwritten and deleted after encrypting; a decrypted .enc contains no plaintext residue, so it can simply be deleted or kept.",
+        "关于错误密码次数限制：": "About the wrong-password limit:",
+        "该机制把剩余次数写在加密文件头中，因此尝试前":
+            "The remaining count is stored in the file header, so before trying you can",
+        "复制一份文件、失败后还原副本": "copy the file and restore the copy after a failure",
+        "即可绕过，也可以用十六进制编辑器重置计数。":
+            "to bypass it, or reset the counter with a hex editor.",
+        "它是有效的威慑与减速带，但不能对抗有意为之的攻击者":
+            "It is a useful deterrent and speed bump, but it will not stop a determined attacker",
+        "，请勿当作可靠的保密手段。文件头中的保护策略本身已纳入认证，无法通过篡改来关闭保护。":
+            ", so do not treat it as reliable protection. The protection policy itself is authenticated and cannot be disabled by tampering.",
+        "「永久删除文件」不可逆：": "\"Delete permanently\" is irreversible:",
+        "若自己忘记密码并连续输错达到上限，文件将被真的删除，无法恢复。":
+            "If you forget the password and hit the limit, the file really is deleted and cannot be recovered.",
+        "核心特性": "Key features",
+        "强加密算法": "Strong encryption",
+        "AES-256-GCM 认证加密，配合 PBKDF2-HMAC-SHA256 密钥派生，密码错误或文件被篡改都能可靠检出。":
+            "AES-256-GCM authenticated encryption with PBKDF2-HMAC-SHA256 key derivation; a wrong password or a tampered file is reliably detected.",
+        "大文件支持": "Large files",
+        "流式分块加/解密，内存占用低，轻松处理大文件。":
+            "Streaming chunked processing keeps memory usage low even for huge files.",
+        "设置面板": "Settings",
+        "语言、主题、输出位置、安全删除覆写次数（1-10）、是否保留源文件、完成后行为与加密强度，全部可视化配置。":
+            "Language, theme, output location, overwrite passes (1-3), keeping the source file, behaviour when done, and encryption strength — all configurable.",
+        "现代 UI": "Modern UI",
+        "WinUI 3 风格自绘界面，圆角控件、悬停与进度动画，支持浅色 / 深色 / 跟随系统主题。":
+            "A hand-drawn WinUI 3 style interface with rounded controls, hover and progress animations, and light / dark / system themes.",
+        "安全删除": "Secure delete",
+        "与加密/解密并列的独立功能：可用随机数据覆写 1-10 次后再删除。支持批量、进度条、后台托盘，删除前一律二次确认。":
+            "A standalone feature alongside encrypt/decrypt: overwrite with random data 1-3 times, then delete. Supports batches, a progress bar and the tray, and always asks for confirmation.",
+        "右键菜单": "Context menu",
+        "资源管理器里右键文件即可「用FileEncryptor加密」或「用FileEncryptor安全删除」，多选同样是一批处理。注册在当前用户下，无需管理员权限。":
+            "Right-click a file in Explorer to \"Encrypt with FileEncryptor\" or \"Securely delete with FileEncryptor\". Multi-selection is handled as one batch. Registered per-user — no admin rights needed.",
+        "防护机制": "Protection",
+        "源文件可覆写删除防止恢复；可设置错误密码次数上限，用尽后永久删除文件或限时禁止解密；支持诱饵文件（可否认加密），被胁迫时可交出假密码解出诱饵。":
+            "The source can be overwritten to prevent recovery; a wrong-password limit can permanently delete the file or lock decryption for a period; decoy files (deniable encryption) let you hand over a fake password under coercion.",
+        "完全便携": "Fully portable",
+        "单 EXE 文件，无需额外 DLL，": "A single EXE with no extra DLLs,",
+        "也不需要安装 OpenSSL": "not even OpenSSL",
+        "——密码学全部使用 Windows 自带的 CNG。":
+            " — all cryptography uses the CNG built into Windows.",
+        "应用预览": "Screenshots",
+        "加密文件界面": "Encrypt screen",
+        "解密文件界面": "Decrypt screen",
+        "主程序界面": "Main window",
+        "设置界面": "Settings screen",
+        "如果这个项目对你有帮助，欢迎请作者喝杯咖啡": "If this project helps you, consider buying the author a coffee",
+        "支付宝": "Alipay",
+        "微信": "WeChat",
+        "您的支持是我持续维护的动力 ❤️": "Your support keeps this project alive ❤️",
+        "开源项目 ·": "Open source ·",
+        "© 2026 虞子尧 · 仅供学习与安全参考": "© 2026 Yu Ziyao · For learning and security reference only",
+        "收款码": "Payment QR code",
+        "关闭": "Close",
+        "极简命令行": "Minimal CLI",
+        "轻量无依赖，支持": "Lightweight and dependency-free, supporting",
+        "密码、": "password,",
+        "强度、": "strength,",
+        "输出目录、": "output folder,",
+        "保留源文件，适合批量处理。": "and keeping the source file — built for batch work.",
+        "隐藏密码输入": "Hidden password input",
+        "交互式输入密码时不回显字符，支持密码确认（加密模式），防止窥屏。":
+            "Passwords are not echoed while typing, with confirmation in encrypt mode, to prevent shoulder surfing.",
+        "加密后可用": "After encrypting you can",
+        "覆写删除源文件、": "overwrite and delete the source,",
+        "保留；": "or keep it;",
+        "可设置错误密码次数上限，用尽后删除文件或限时禁止解密；":
+            "set a wrong-password limit that deletes the file or locks decryption;",
+        "可指定诱饵文件与假密码；": "specify a decoy file and fake password;",
+        "只写一个槽、体积减半。": "or write a single slot to halve the file size.",
+        "零依赖": "Zero dependencies",
+        "静态链接，单文件无外部依赖；密码学使用 Windows 自带的 CNG，":
+            "Statically linked, one file, no external dependencies; cryptography uses the CNG built into Windows,",
+        "。仅支持 Windows。": ". Windows only."
+    };
+
+    var TITLES = {
+        zh: "FileEncryptor - 安全、高效的文件加密工具",
+        en: "FileEncryptor - Secure, fast file encryption"
+    };
+
+    var lang = "zh";
+    var busy = false;
+
+    function walk(root) {
+        if (!root || busy) return;
+        busy = true;
+        var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var n;
+        while ((n = w.nextNode())) {
+            if (n.__zh === undefined) n.__zh = n.nodeValue;   // 记住中文原文
+            var raw = n.__zh;
+            var key = raw.trim();
+            if (!key) continue;
+            var en = DICT[key];
+            if (lang === "en" && en) {
+                n.nodeValue = raw.replace(key, en);
+            } else {
+                n.nodeValue = raw;
+            }
+        }
+        busy = false;
+    }
+
+    function apply() {
+        document.title = TITLES[lang];
+        document.documentElement.setAttribute("lang", lang === "en" ? "en" : "zh-CN");
+        walk(document.body);
+        var btn = document.getElementById("langToggle");
+        if (btn) {
+            btn.querySelector(".lang-zh").classList.toggle("active", lang === "zh");
+            btn.querySelector(".lang-en").classList.toggle("active", lang === "en");
+        }
+    }
+
+    window.addEventListener("DOMContentLoaded", function () {
+        var btn = document.getElementById("langToggle");
+        if (btn) {
+            btn.addEventListener("click", function () {
+                lang = (lang === "zh") ? "en" : "zh";
+                apply();
+            });
+        }
+        // GUI / CLI 卡片是切换时才生成的，生成完再翻译一遍
+        if (typeof window.switchVersion === "function") {
+            var orig = window.switchVersion;
+            window.switchVersion = function (v) { orig(v); apply(); };
+        }
+        apply();
+    });
+})();
 </script>
 
 </body>

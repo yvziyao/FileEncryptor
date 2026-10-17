@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+﻿#define _CRT_SECURE_NO_WARNINGS
 
 #include <windows.h>
 #include <commctrl.h>
@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <cstring>
+#include <algorithm>
 #include <ctime>
 #include "resource.h"
 #include "app_settings.h"
@@ -322,6 +323,8 @@ struct TaskRequest {
     // 复用同一个队列，因此批量、进度条、后台托盘、队列计数全部自动具备。
     bool                      isSecureDelete = false;
     int                       deletePasses = 0;
+    // 删除文件夹时：里面的文件删完后，这些目录也要一并移除（自底向上）
+    std::vector<std::wstring> dirsToRemove;
 };
 
 // 待处理任务队列（std::deque 由 g_queueMutex 保护）。
@@ -695,8 +698,8 @@ std::wstring PickFolderDialog(HWND owner, const std::wstring& initial) {
     return result;
 }
 
-// 安全删除用的**多选**文件选择器（加密/解密按钮是单选，删除要批量更顺手）
-static std::vector<std::wstring> PickFilesForDelete(HWND owner) {
+// 多选文件选择器。加密 / 解密 / 安全删除共用，所以按钮和拖放能走同一条批量流程。
+static std::vector<std::wstring> PickFilesMulti(HWND owner) {
     std::vector<std::wstring> out;
     IFileOpenDialog* dlg = nullptr;
     if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
@@ -749,11 +752,30 @@ static void ShowProgressBar(bool show) {
     }
 }
 
+// 进度上报节流用的状态（工作线程私有）
+static int       g_progLastPos  = -1;
+static ULONGLONG g_progLastTick = 0;
+
 // 按“所有文件的总字节数”折算整体进度（0.0 ~ 1.0），再投递给 UI 线程
 static void SetProgressFraction(double overall) {
     int pos = (int)(overall * 100.0 + 0.5);
     if (pos < 0) pos = 0;
     if (pos > 100) pos = 100;
+
+    // 节流。安全删除大文件时 fe::SecureDeleteFile 每 64KB 就回调一次，
+    // 一秒能 post 上万条 WM_APP_UPDATE_PROGRESS，把 WM_PAINT 挤到队列最后 ——
+    // 表现就是主界面三个按钮一个一个慢慢刷出来（隔 2-3 秒才出一个）。
+    // 这里限制到最多约 30 次/秒，且百分比没变时最多 2 次/秒。
+    const ULONGLONG now = GetTickCount64();
+    if (pos == g_progLastPos) {
+        if (now - g_progLastTick < 500) return;
+    }
+    else {
+        if (now - g_progLastTick < 33) return;
+    }
+    g_progLastPos = pos;
+    g_progLastTick = now;
+
     if (g_mainWnd) {
         PostMessageW(g_mainWnd, WM_APP_UPDATE_PROGRESS, (WPARAM)pos, 0);
     }
@@ -803,6 +825,22 @@ static void ProgressEndFile() {
 static void ProgressFinish() {
     SetProgressFraction(1.0);
     ShowProgressBar(false);
+}
+
+// 递归收集目录（含子目录）。删完文件后要按"先子后父"的顺序移除，
+// 所以这里把整棵目录树都记下来，而不是只记请求里给的那个根。
+static void CollectDirsRecursive(const std::wstring& path, std::vector<std::wstring>& out) {
+    out.push_back(path);
+    WIN32_FIND_DATAW fd;
+    const std::wstring search = path + L"\\*";
+    HANDLE h = FindFirstFileW(search.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            CollectDirsRecursive(path + L"\\" + fd.cFileName, out);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
 }
 
 // 递归收集文件
@@ -1674,7 +1712,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // 安全删除：选文件 -> 二次确认 -> 入队（与加解密共用批量/进度/托盘）
         if (id == 3) {
             SetStatusText(tr(L"请选择要安全删除的文件...", L"Select files to securely delete..."));
-            std::vector<std::wstring> picked = PickFilesForDelete(hWnd);
+            std::vector<std::wstring> picked = PickFilesMulti(hWnd);
             if (picked.empty()) {
                 SetStatusText(tr(L"已取消", L"Cancelled"));
                 break;
@@ -1683,53 +1721,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         }
 
-        if (id == 1 || id == 2) { // 加密 / 解密
+        if (id == 1 || id == 2) { // 加密 / 解密（支持多选）
             const bool encrypting = (id == 1);
-            SetStatusText(encrypting ? tr(L"请选择要加密的文件...", L"Select a file to encrypt...")
-                                     : tr(L"请选择要解密的文件...", L"Select a file to decrypt..."));
+            SetStatusText(encrypting ? tr(L"请选择要加密的文件...", L"Select files to encrypt...")
+                                     : tr(L"请选择要解密的文件...", L"Select files to decrypt..."));
 
-            std::wstring input_path = OpenFileDialog(!encrypting);
-            if (input_path.empty()) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+            std::vector<std::wstring> picked = PickFilesMulti(hWnd);
+            if (picked.empty()) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
 
-            if (!encrypting && (input_path.size() < 4 || input_path.substr(input_path.size() - 4) != L".enc")) {
-                ShowUiMessage(hWnd, UiIcon::Error, tr(L"错误", L"Error"),
-                              tr(L"请选择 .enc 加密文件！", L"Please select a .enc encrypted file!"), false);
-                SetStatusText(tr(L"不是加密文件", L"Not an encrypted file"));
-                break;
-            }
-
-            // 同上：不再拦截，重复创建的任务进入队列
-
-            std::string password;
-            Protection prot;
-            std::wstring decoyFile2;
-            std::string  decoyPwd2;
-            if (encrypting) {
-                // 加密：密码框里可以同时配置防暴力破解；单文件可额外启用诱饵
-                // 设置里勾了「禁用诱饵文件」时不再提供诱饵选项（单槽写不下诱饵）
-                if (!CollectEncryptPassword(hWnd, input_path, password, prot, true,
-                                            !Settings().decoyDisabled, &decoyFile2, &decoyPwd2)) {
-                    SetStatusText(tr(L"已取消", L"Cancelled"));
-                    break;
+            // 解密必须全是 .enc 文件
+            if (!encrypting) {
+                bool allEnc = true;
+                for (const auto& p : picked) {
+                    if (p.size() < 4 || p.substr(p.size() - 4) != L".enc") { allEnc = false; break; }
                 }
-            }
-            else {
-                std::wstring blocked;
-                const PwdCollect r = CollectDecryptPassword(hWnd, input_path, password, blocked);
-                if (r == PwdCollect::Cancelled) {
-                    SetStatusText(tr(L"已取消", L"Cancelled"));
-                    break;
-                }
-                if (r == PwdCollect::Blocked) {
-                    ShowUiMessage(hWnd, UiIcon::Error, tr(L"无法解密", L"Cannot decrypt"),
-                                  input_path + L"\n" + blocked, true);
-                    SetStatusText(tr(L"已拒绝", L"Refused"));
+                if (!allEnc) {
+                    ShowUiMessage(hWnd, UiIcon::Error, tr(L"错误", L"Error"),
+                                  tr(L"解密只能选择 .enc 加密文件！",
+                                     L"You can only select .enc files to decrypt!"), false);
+                    SetStatusText(tr(L"不是加密文件", L"Not an encrypted file"));
                     break;
                 }
             }
 
-            // 放到后台线程执行，避免界面卡死（不再出现“无响应”）
-            StartProcessing({ input_path }, {}, password, {}, prot, decoyFile2, decoyPwd2);
+            // 直接走拖放的整条流程：逐个收集密码、批量排队、进度条、后台托盘
+            // 全都复用，选中多个文件就是一批任务。
+            PostFilesAsDrop(hWnd, picked);
             break;
         }
 
@@ -2147,7 +2164,8 @@ static PwdCollect CollectDecryptPassword(HWND owner, const std::wstring& file,
 //
 // 与加解密共用同一个任务队列，所以批量处理、进度条、后台托盘、
 // 「已完成 x / y」队列计数全部自动具备，不需要另写一套。
-static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int passes) {
+static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int passes,
+                                const std::vector<std::wstring>& dirsToRemove = {}) {
     const bool english   = g_langEnglish;
     // 显式点「安全删除」时至少要覆写一遍：0 在设置里表示"不删除"，
     // 用在这里会让按钮名不副实。总工作量与实际写入必须用同一个值。
@@ -2218,6 +2236,18 @@ static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int pass
     // 少了它进度条会一直停在 100% 不消失。
     ProgressFinish();
 
+    // 删除文件夹：里面的文件已经删完，现在把（应该已经空的）目录移除。
+    // 按路径长度从长到短，保证先删子目录再删父目录。
+    if (!dirsToRemove.empty()) {
+        std::vector<std::wstring> dirs = dirsToRemove;
+        std::sort(dirs.begin(), dirs.end(),
+                  [](const std::wstring& a, const std::wstring& b) { return a.size() > b.size(); });
+        for (const auto& d : dirs) {
+            // RemoveDirectoryW 只能删空目录；非空说明里面有删不掉的东西，忽略即可
+            RemoveDirectoryW(d.c_str());
+        }
+    }
+
     if (failedList.empty()) {
         postStatus(english ? L"Done" : L"完成");
         const std::wstring text = english
@@ -2260,27 +2290,60 @@ static void StartProcessing(std::vector<std::wstring> files,
 }
 
 // 安全删除任务：只需文件列表 + 覆写次数
-static void StartSecureDelete(std::vector<std::wstring> files, int passes) {
-    if (files.empty()) return;
+static void StartSecureDelete(std::vector<std::wstring> files, int passes,
+                              std::vector<std::wstring> dirsToRemove = {}) {
+    if (files.empty() && dirsToRemove.empty()) return;
     TaskRequest task;
     task.files = std::move(files);
     task.isSecureDelete = true;
     task.deletePasses = passes;
+    task.dirsToRemove = std::move(dirsToRemove);
     EnqueueAndRun(std::move(task));
 }
 
 // 安全删除前的二次确认。
 // 删除不可撤销，无论从按钮还是拖放进来都必须先过这一关。
-static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> files) {
-    if (files.empty()) return;
+static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> paths) {
+    if (paths.empty()) return;
+
+    // 传进来的可能是文件夹。展开成里面的文件，同时记下文件夹本身 ——
+    // 删完文件后要把它也移除，否则会留下一堆空目录。
+    std::vector<std::wstring> files;
+    std::vector<std::wstring> dirs;
+    for (const auto& p : paths) {
+        const DWORD attrs = GetFileAttributesW(p.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            CollectDirsRecursive(p, dirs);   // 含所有子目录，删完文件后自底向上移除
+            CollectFilesRecursive(p, files);
+        }
+        else {
+            files.push_back(p);
+        }
+    }
+    if (files.empty() && dirs.empty()) return;
 
     const bool english = g_langEnglish;
     // 显式删除至少覆写一遍（设置里的 0 表示"加密后不删源文件"，用在这里没有意义）
     const int configured = (int)Settings().secureDelete;
     const int passes = (configured > 0) ? configured : 1;
 
+    // 文件夹信息：让用户清楚这一下会把整个目录都删掉
+    std::wstring dirNote;
+    if (!dirs.empty()) {
+        if (files.empty()) {
+            dirNote = english
+                ? (L"\n\n" + std::to_wstring(dirs.size()) + L" folder(s) will be removed.")
+                : (L"\n\n将一并移除 " + std::to_wstring(dirs.size()) + L" 个文件夹（含其中所有文件）。");
+        }
+        else {
+            dirNote = english
+                ? (L"\n\n" + std::to_wstring(dirs.size()) + L" folder(s) will be removed as well.")
+                : (L"\n\n将一并移除 " + std::to_wstring(dirs.size()) + L" 个文件夹（含其中所有文件）。");
+        }
+    }
+
     std::wstring text;
-    if (files.size() == 1) {
+    if (files.size() == 1 && dirs.empty()) {
         const size_t pos = files[0].find_last_of(L"\\/");
         const std::wstring name = (pos == std::wstring::npos) ? files[0] : files[0].substr(pos + 1);
         text = english
@@ -2299,6 +2362,7 @@ static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> files) 
             : (L"确定要安全删除这 " + std::to_wstring(files.size()) +
                L" 个文件吗？\n\n每个将覆写 " + std::to_wstring(passes) +
                L" 次后删除，此操作不可恢复。");
+        text += dirNote;
     }
 
     UiMessage m;
@@ -2309,7 +2373,7 @@ static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> files) 
     m.topmost = true;
     if (UiShowMessage(owner, m) != IDYES) return;
 
-    StartSecureDelete(std::move(files), passes);
+    StartSecureDelete(std::move(files), passes, std::move(dirs));
 }
 
 static void EnqueueAndRun(TaskRequest task) {
@@ -2345,6 +2409,7 @@ static void EnqueueAndRun(TaskRequest task) {
         std::vector<std::wstring> files            = std::move(req.files);
         const bool                isSecureDelete   = req.isSecureDelete;
         const int                 reqDeletePasses  = req.deletePasses;
+        const std::vector<std::wstring> reqDirs    = std::move(req.dirsToRemove);
         std::vector<std::string>  perFilePasswords = std::move(req.perFilePasswords);
         const std::string         singlePassword   = std::move(req.singlePassword);
         std::vector<Protection>   perFileProts     = std::move(req.perFileProts);
@@ -2354,7 +2419,7 @@ static void EnqueueAndRun(TaskRequest task) {
 
         // ---- 「安全删除」任务：与加解密完全分开的一条路径 ----
         if (isSecureDelete) {
-            RunSecureDeleteTask(files, reqDeletePasses);
+            RunSecureDeleteTask(files, reqDeletePasses, reqDirs);
             g_taskRunning = 0;
             g_tasksDone++;
             if (g_mainWnd) PostMessageW(g_mainWnd, WM_APP_QUEUE_CHANGED, 0, 0);

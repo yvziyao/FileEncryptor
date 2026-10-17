@@ -1,4 +1,4 @@
-// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
+﻿// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
 //
 // 结构：
 //   UiDlgState        一次模态会话的全部状态（栈上分配，窗口销毁后返回）
@@ -375,7 +375,7 @@ std::wstring DecoyChkLabel() {
 }
 // 「加密后保留源文件」复选框文案
 std::wstring KeepChkLabel() {
-    return tr(L"加密后保留源文件（不删除）", L"Keep source files after encrypting");
+    return tr(L"加/解密后保留源文件（不删除）", L"Keep source files after encrypting/decrypting");
 }
 
 // 「在资源管理器右键菜单中显示」复选框文案
@@ -430,27 +430,6 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
             (void)lw;
         }
 
-        // 「安全删除覆写次数」的提示行（警告 / 错误）也要放得下。
-        // 之前没算它 —— 中文够短看不出来，切到英文就被截成
-        // "Note: too many passes may reduce disk lifespan and slow d..."。
-        {
-            HFONT fSmall = UiFont(UiPx(12), false);
-            const std::wstring hints[] = {
-                tr(L"注意：覆写次数过多可能减少磁盘使用寿命，并降低删除速度",
-                   L"Note: too many passes may reduce disk lifespan and slow deletion"),
-                tr(L"错误：请输入1-10之间的数字",
-                   L"Error: please enter a number between 1 and 10"),
-            };
-            int maxHint = 0;
-            for (const auto& h : hints) {
-                int hw = 0, hh = 0;
-                MeasureText(dc, fSmall, h, UiPx(1200), true, &hw, &hh);
-                if (hw > maxHint) maxHint = hw;
-            }
-            // 提示行从 segLeft 开始，而 segLeft = pad + labelW + 16
-            const int hintNeed = st->pad * 2 + labelW + UiPx(16) + maxHint;
-            if (hintNeed > needW) needW = hintNeed;
-        }
 
         if (needW > winW) winW = needW;
     }
@@ -468,21 +447,6 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         const int segLeft = st->contentX + labelW + UiPx(16);
         r.segRc = { segLeft, y, st->contentX + st->contentW, y + rowH };
 
-        // 第 3 行是「安全删除覆写次数」的数字输入框，不是分段控件。
-        // 仍保留这一行占位，其它行的下标才不会错位。
-        if (r.key == 3) {
-            const int editW = UiPx(72);
-            const int editH = UiPx(28);
-            const int editTop = y + (rowH - editH) / 2;
-            st->rPassesEdit = { segLeft, editTop, segLeft + editW, editTop + editH };
-            r.itemRc.clear();
-            y += rowH + rowGap;
-            // 提示行始终占位：出现警告/错误时窗口尺寸不跳动
-            st->rPassesHint = { segLeft, y - rowGap + UiPx(2),
-                                st->contentX + st->contentW, y - rowGap + UiPx(2) + hintH };
-            y += hintH + UiPx(4);
-            continue;
-        }
 
         r.itemRc.clear();
         const int n = (int)r.options.size();
@@ -1104,22 +1068,6 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
     for (size_t i = 0; i < st->rows.size(); ++i) {
         const UiDlgState::SegRow& row = st->rows[i];
 
-        // 第 3 行是数字输入框（安全删除覆写次数），不是分段控件
-        if (row.key == 3) {
-            RECT plr = row.labelRc;
-            UiDrawTextLine(dc, row.label, plr, fBody, c.text,
-                           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            RECT well = st->rPassesEdit;
-            InflateRect(&well, UiPx(3), UiPx(3));
-            UiDrawRoundRect(dc, well, UiPx(5), true, c.bgAlt, true,
-                            st->passesError ? c.danger : c.border);
-            if (!st->passesHint.empty()) {
-                UiDrawTextLine(dc, st->passesHint, st->rPassesHint, fSmall,
-                               st->passesError ? c.danger : WarningColor(),
-                               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            }
-            continue;
-        }
 
         RECT lr = row.labelRc;
         UiDrawTextLine(dc, row.label, lr, fBody, c.text,
@@ -1812,25 +1760,6 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             st->btns.push_back(b);
         }
-        // 设置面板：安全删除覆写次数（数字输入框）
-        if (st->isSettings) {
-            HWND e = CreateWindowExW(0, L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL,
-                st->rPassesEdit.left, st->rPassesEdit.top,
-                st->rPassesEdit.right - st->rPassesEdit.left,
-                st->rPassesEdit.bottom - st->rPassesEdit.top,
-                hwnd, (HMENU)(INT_PTR)IDC_UI_PASSES, inst, NULL);
-            if (e) {
-                SendMessageW(e, WM_SETFONT, (WPARAM)UiFont(UiPx(14), false), TRUE);
-                SendMessageW(e, EM_SETLIMITTEXT, 2, 0);   // 0-10，最多两位
-                ApplyEditTheme(e, st, false);             // 数字框不用密码掩码
-                st->editPasses = e;
-                wchar_t buf[8] = {};
-                swprintf_s(buf, L"%d", (int)st->data.secureDelete);
-                SetWindowTextW(e, buf);
-                ValidatePasses(st);
-            }
-        }
 
         // 子控件是按布局矩形创建的，但要再摆一次：
         // 一来保证位置/可见性与最新布局一致，二来让圆角区域按真实尺寸重算
@@ -2083,21 +2012,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         if (id == IDOK || id == IDCANCEL || id == IDYES || id == IDNO) {
-            // 设置面板：覆写次数不合法就不让关，把焦点放回输入框
-            if (st->isSettings && id == IDOK) {
-                if (!ValidatePasses(st)) {
-                    MessageBeep(MB_ICONWARNING);
-                    InvalidateRect(hwnd, NULL, FALSE);
-                    if (st->editPasses) SetFocus(st->editPasses);
-                    return 0;
-                }
-                // 必须在这里取值：对话框一销毁，EDIT 子控件就没了，
-                // 之后再 GetWindowText 只会得到空串（会被 _wtoi 变成 0）。
-                wchar_t pbuf[16] = {};
-                if (st->editPasses) GetWindowTextW(st->editPasses, pbuf, _countof(pbuf));
-                const int pv = _wtoi(pbuf);
-                st->data.secureDelete = (pv < 0) ? 0 : (pv > 10 ? 10 : pv);
-            }
+
             if (st->isPassword && id == IDOK) {
                 wchar_t buf1[256] = {};
                 wchar_t buf2[256] = {};
@@ -2500,8 +2415,10 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
            { tr(L"源文件同目录", L"Same folder"), tr(L"指定目录", L"Fixed folder"),
              tr(L"每次都询问", L"Ask each time") },
            st.data.outDir);
-    // 第 3 行不是分段控件：这一格放「安全删除覆写次数」数字输入框（0 = 不删除）
-    addRow(3, tr(L"安全删除覆写次数", L"Overwrite passes"), {}, 0);
+    // 覆写次数：1 / 2 / 3 次（对应 secureDelete = 1..3）
+    addRow(3, tr(L"安全删除覆写次数", L"Overwrite passes"),
+           { tr(L"1 次", L"1 pass"), tr(L"2 次", L"2 passes"), tr(L"3 次", L"3 passes") },
+           st.data.secureDelete >= 3 ? 2 : (st.data.secureDelete == 2 ? 1 : 0));
     addRow(4, tr(L"完成后", L"When done"),
            { tr(L"关闭窗口", L"Close window"), tr(L"弹窗提示", L"Show dialog") },
            st.data.completion);
@@ -2516,8 +2433,7 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
     io.theme        = st.rows[1].selected;
     io.outDir       = st.rows[2].selected;
     io.fixedDir     = st.data.fixedDir;
-    // 覆写次数已在点“确定”时取出（那时 EDIT 还在）；这里不能再去读控件
-    io.secureDelete = st.data.secureDelete;
+    io.secureDelete = (st.rows.size() > 3) ? (st.rows[3].selected + 1) : 3;
     io.completion   = st.rows[4].selected;
     io.strength     = st.rows[5].selected;
     io.decoyDisabled = st.decoyDisabled;

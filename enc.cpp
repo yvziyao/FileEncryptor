@@ -1,4 +1,4 @@
-// enc.cpp
+﻿// enc.cpp
 // 极简命令行文件加密工具（加密/解密、指定输出目录、可控安全删除）
 //
 // 源码为 UTF-8（带 BOM），保证在任何 ANSI 代码页的机器上都能正确编译。
@@ -253,14 +253,14 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
     std::cout << std::endl;
 }
 void print_usage(const char* prog_name) {
-    std::cout << "用法: " << prog_name << " -e|-d -i <输入文件> [选项]" << std::endl;
-    std::cout << "  -e            加密模式" << std::endl;
-    std::cout << "  -d            解密模式" << std::endl;
+    std::cout << "用法: " << prog_name << " -i <输入文件> [选项]" << std::endl;
+    std::cout << "                加密/解密由输入文件后缀自动判断：" << std::endl;
+    std::cout << "                .enc 结尾 = 解密，其它 = 加密（无需 -e / -d）" << std::endl;
     std::cout << "  -i <文件>     输入文件路径" << std::endl;
     std::cout << "  -o <目录>     输出目录（默认与输入文件同目录）" << std::endl;
     std::cout << "  -p <密码>     密码（可选）。如不提供，会交互式输入" << std::endl;
     std::cout << "  -s <强度>     加密强度：fast|standard|secure|extreme（默认 standard）" << std::endl;
-    std::cout << "                对应 PBKDF2 迭代次数 5万 / 10万 / 30万 / 60万" << std::endl;
+    std::cout << "                对应 PBKDF2 迭代次数 15万 / 30万 / 45万 / 60万" << std::endl;
     std::cout << "  -w <次数>     源文件处理：0=保留源文件（等同 -k），1-10=删除前覆写次数（默认 3）" << std::endl;
     std::cout << "  -k, --keep    保留源文件（加密时）/ 加密文件（解密时），不做删除" << std::endl;
     std::cout << "                说明：解密后的加密文件不含明文残留，删除时不覆写" << std::endl;
@@ -279,15 +279,15 @@ void print_usage(const char* prog_name) {
     std::cout << "                           lock=禁止解密一段时间" << std::endl;
     std::cout << "  -l, --lock-days <天数>   lock 模式下的锁定时长（0-3650，默认 7）" << std::endl;
     std::cout << "示例:" << std::endl;
-    std::cout << "  交互式加密: " << prog_name << " -e -i secret.txt" << std::endl;
-    std::cout << "  命令行加密: " << prog_name << " -e -i secret.txt -p mypass" << std::endl;
-    std::cout << "  高强度加密: " << prog_name << " -e -i secret.txt -p mypass -s extreme" << std::endl;
+    std::cout << "  交互式加密: " << prog_name << " -i secret.txt" << std::endl;
+    std::cout << "  命令行加密: " << prog_name << " -i secret.txt -p mypass" << std::endl;
+    std::cout << "  高强度加密: " << prog_name << " -i secret.txt -p mypass -s extreme" << std::endl;
     std::cout << "  安全删除文件: " << prog_name << " --delete secret.txt" << std::endl;
     std::cout << "  安全删除多个: " << prog_name << " --delete a.txt b.txt c.txt -w 3" << std::endl;
-    std::cout << "  输出到指定目录: " << prog_name << " -e -i secret.txt -p mypass -o D:\\Encrypted" << std::endl;
-    std::cout << "  保留源文件: " << prog_name << " -e -i secret.txt -p mypass -k" << std::endl;
-    std::cout << "  错 3 次即永久删除: " << prog_name << " -e -i secret.txt -p mypass -t 3" << std::endl;
-    std::cout << "  错 5 次锁定 7 天:  " << prog_name << " -e -i secret.txt -p mypass -t 5 -x lock -l 7" << std::endl;
+    std::cout << "  输出到指定目录: " << prog_name << " -i secret.txt -p mypass -o D:\\Encrypted" << std::endl;
+    std::cout << "  保留源文件: " << prog_name << " -i secret.txt -p mypass -k" << std::endl;
+    std::cout << "  错 3 次即永久删除: " << prog_name << " -i secret.txt -p mypass -t 3" << std::endl;
+    std::cout << "  错 5 次锁定 7 天:  " << prog_name << " -i secret.txt -p mypass -t 5 -x lock -l 7" << std::endl;
     std::cout << "  批量解密:   for %f in (*.enc) do " << prog_name
               << " -d -i \"%f\" -p mypass -o D:\\Decrypted" << std::endl;
 }
@@ -316,7 +316,9 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = ArgToUtf8(argv[i]);
         if (arg == "-e" || arg == "-d") {
-            mode = arg;
+            std::cerr << "错误：已不再需要 -e / -d，程序按输入文件后缀自动判断" << std::endl;
+            std::cerr << "      （.enc 结尾 = 解密，其它 = 加密）" << std::endl;
+            return 1;
         } else if (arg == "-i" && i + 1 < argc) {
             input_file = ArgToUtf8(argv[++i]);
         } else if (arg == "-o" && i + 1 < argc) {
@@ -402,9 +404,16 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    // 不指定 -e / -d 时按后缀自动判断：.enc 结尾 = 解密，否则 = 加密
     if (mode.empty()) {
-        print_usage(argv[0]);
-        return 1;
+        if (input_file.empty()) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        mode = (input_file.size() >= 4 && input_file.substr(input_file.size() - 4) == ".enc")
+                   ? "-d" : "-e";
+        std::cout << "（未指定 -e/-d，按后缀自动判断："
+                  << (mode == "-e" ? "加密" : "解密") << "）" << std::endl;
     }
     // --delete 可以用位置参数给文件，所以不强制 -i
     if (mode == "--delete") {

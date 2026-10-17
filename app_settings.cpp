@@ -71,10 +71,10 @@ void SettingsLoad() {
     s.fixedOutDir  = RegGetString(L"OutDir");
     s.completion   = ClampEnum<CompletionMode>(RegGetDword(L"Completion", 1), 1, CompletionMode::ShowDialog);
 
-    // 覆写次数夹到 1-10
+    // 覆写次数夹到 1-3（设置面板里是 1/2/3 三档）
     DWORD sd = RegGetDword(L"SecureDelete", 3);
-    if (sd < 1)  sd = 1;
-    if (sd > 10) sd = 10;
+    if (sd < 1) sd = 1;
+    if (sd > 3) sd = 3;
     s.secureDelete = (int)sd;
     s.keepSource = RegGetDword(L"KeepSource", 0) != 0;
     s.shellMenu = RegGetDword(L"ShellMenu", 1) != 0;
@@ -99,18 +99,18 @@ void SettingsSave() {
 
 int StrengthIterations(StrengthMode s) {
     switch (s) {
-    case StrengthMode::Fast:    return 50000;
-    case StrengthMode::Standard: return 100000;
-    case StrengthMode::Secure:  return 300000;
+    case StrengthMode::Fast:    return 150000;
+    case StrengthMode::Standard: return 300000;
+    case StrengthMode::Secure:  return 450000;
     case StrengthMode::Extreme: return 600000;
     }
-    return 100000;
+    return 300000;
 }
 
 StrengthMode StrengthFromIterations(unsigned int iterations) {
-    if (iterations <= 50000)  return StrengthMode::Fast;
-    if (iterations <= 100000) return StrengthMode::Standard;
-    if (iterations <= 300000) return StrengthMode::Secure;
+    if (iterations <= 150000) return StrengthMode::Fast;
+    if (iterations <= 300000) return StrengthMode::Standard;
+    if (iterations <= 450000) return StrengthMode::Secure;
     return StrengthMode::Extreme;
 }
 
