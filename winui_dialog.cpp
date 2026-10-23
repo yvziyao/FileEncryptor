@@ -1,4 +1,4 @@
-﻿// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
+// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
 //
 // 结构：
 //   UiDlgState        一次模态会话的全部状态（栈上分配，窗口销毁后返回）
@@ -17,6 +17,7 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,10 @@ std::wstring PickFolderDialog(HWND owner, const std::wstring& initial);
 #define IDC_UI_DAYS     2006
 #define IDC_UI_CHK_DECOY 2007   // 可否认加密：使用诱饵文件
 #define IDC_UI_PASSES    2008   // 设置：安全删除覆写次数（数字输入框）
+
+// 设置里「双击赞助」打开的页面（站点地址如需变更，改这一行即可）。
+// #donate 对应 index.html 里的捐助区块。
+static const wchar_t* kSponsorUrl = L"https://yvziyao.github.io/FileEncryptor/#donate";
 
 namespace {
 
@@ -225,6 +230,9 @@ struct UiDlgState {
     // 设置面板：「加密后保留源文件」复选框
     int               keepSource = 0;
     RECT              rKeepBox{}, rKeepLabel{};
+    // 设置面板左下角的「双击赞助」小按钮
+    RECT              rSponsor{};
+    ULONGLONG         sponsorLastClick = 0;
     // 设置面板：「在资源管理器右键菜单中显示」
     int               shellMenu = 1;
     RECT              rMenuBox{}, rMenuLabel{};
@@ -509,6 +517,18 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         st->rMenuLabel = { st->rMenuBox.right + UiPx(8), y,
                            st->rMenuBox.right + UiPx(8) + lw, y + chkH };
         y += chkH + rowGap;
+    }
+
+    // 左下角留一个「双击赞助」的小按钮（右侧的确定/取消由 PositionButtons 右对齐）。
+    // 宽度按**当前语言**的文字实测 —— 固定 112px 装不下英文 "Double-click to sponsor"。
+    {
+        int sw = 0, sh = 0;
+        MeasureText(dc, UiFont(UiPx(12), false),
+                    tr(L"☕ 双击赞助", L"☕ Double-click to sponsor"),
+                    UiPx(420), true, &sw, &sh);
+        const int pillW = sw + UiPx(26);   // 左右各留 13px 内边距
+        const int pillTop = y + (st->btnH - UiPx(28)) / 2;
+        st->rSponsor = { st->pad, pillTop, st->pad + pillW, pillTop + UiPx(28) };
     }
 
     st->btnArea = { st->pad, y, winW - st->pad, y + st->btnH };
@@ -1172,6 +1192,15 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
         RECT mr = st->rMenuLabel;
         UiDrawTextLine(dc, MenuChkLabel(), mr, fBody, c.text,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // 左下角「双击赞助」：不做成独立控件，直接自绘一个低调的小胶囊
+    if (!IsRectEmpty(&st->rSponsor)) {
+        UiDrawRoundRect(dc, st->rSponsor, UiPx(6), true, c.bgAlt, true, c.border);
+        RECT sr = st->rSponsor;
+        UiDrawTextLine(dc, tr(L"☕ 双击赞助", L"☕ Double-click to sponsor"), sr,
+                       UiFont(UiPx(12), false), c.textMuted,
+                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
@@ -1876,6 +1905,8 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (!IsRectEmpty(&st->rMenuBox) &&
                 (PtInRect(&st->rMenuBox, pt) || PtInRect(&st->rMenuLabel, pt)))
                 return HTCLIENT;
+            if (!IsRectEmpty(&st->rSponsor) && PtInRect(&st->rSponsor, pt))
+                return HTCLIENT;
         }
         return HTCAPTION; // 其余区域允许拖动整个卡片
     }
@@ -1920,6 +1951,19 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 (PtInRect(&st->rMenuBox, pt) || PtInRect(&st->rMenuLabel, pt))) {
                 st->shellMenu = st->shellMenu ? 0 : 1;
                 InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            // 左下角「双击赞助」：两次点击间隔 <500ms 才算双击，
+            // 免得用户想点确定却误触把浏览器打开。
+            if (!IsRectEmpty(&st->rSponsor) && PtInRect(&st->rSponsor, pt)) {
+                const ULONGLONG now = GetTickCount64();
+                if (st->sponsorLastClick != 0 && now - st->sponsorLastClick < 500) {
+                    st->sponsorLastClick = 0;
+                    ShellExecuteW(NULL, L"open", kSponsorUrl, NULL, NULL, SW_SHOWNORMAL);
+                }
+                else {
+                    st->sponsorLastClick = now;
+                }
                 return 0;
             }
             return 0;

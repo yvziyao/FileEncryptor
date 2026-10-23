@@ -11,9 +11,9 @@
 #include <vector>
 
 // 密码学运算全部使用 Windows 自带的 CNG（bcrypt）：
-//   * 不再依赖第三方 OpenSSL —— 只需要 Windows SDK 就能构建
+//   * 不使用任何第三方库 —— 只需要 Windows SDK 就能构建
 //   * CNG 是系统组件，始终存在、经过 FIPS 验证
-//   * 算法结果与 OpenSSL 完全一致（都是 AES-GCM / PBKDF2-HMAC-SHA256 / HMAC-SHA256 标准），
+//   * 算法全部是标准实现（AES-GCM / PBKDF2-HMAC-SHA256 / HMAC-SHA256），
 //     所以**文件格式与密文均不受影响**，旧版本加密的文件仍可解开
 #pragma comment(lib, "bcrypt.lib")
 

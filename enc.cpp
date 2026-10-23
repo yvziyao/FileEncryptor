@@ -253,10 +253,8 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
     std::cout << std::endl;
 }
 void print_usage(const char* prog_name) {
-    std::cout << "用法: " << prog_name << " -i <输入文件> [选项]" << std::endl;
-    std::cout << "                加密/解密由输入文件后缀自动判断：" << std::endl;
-    std::cout << "                .enc 结尾 = 解密，其它 = 加密（无需 -e / -d）" << std::endl;
-    std::cout << "  -i <文件>     输入文件路径" << std::endl;
+    std::cout << "用法: " << prog_name << " <文件> [选项]" << std::endl;
+    std::cout << "                .enc 结尾按解密处理，其它按加密处理" << std::endl;
     std::cout << "  -o <目录>     输出目录（默认与输入文件同目录）" << std::endl;
     std::cout << "  -p <密码>     密码（可选）。如不提供，会交互式输入" << std::endl;
     std::cout << "  -s <强度>     加密强度：fast|standard|secure|extreme（默认 standard）" << std::endl;
@@ -279,17 +277,17 @@ void print_usage(const char* prog_name) {
     std::cout << "                           lock=禁止解密一段时间" << std::endl;
     std::cout << "  -l, --lock-days <天数>   lock 模式下的锁定时长（0-3650，默认 7）" << std::endl;
     std::cout << "示例:" << std::endl;
-    std::cout << "  交互式加密: " << prog_name << " -i secret.txt" << std::endl;
-    std::cout << "  命令行加密: " << prog_name << " -i secret.txt -p mypass" << std::endl;
-    std::cout << "  高强度加密: " << prog_name << " -i secret.txt -p mypass -s extreme" << std::endl;
+    std::cout << "  交互式加密: " << prog_name << " secret.txt" << std::endl;
+    std::cout << "  命令行加密: " << prog_name << " secret.txt -p mypass" << std::endl;
+    std::cout << "  高强度加密: " << prog_name << " secret.txt -p mypass -s extreme" << std::endl;
     std::cout << "  安全删除文件: " << prog_name << " --delete secret.txt" << std::endl;
     std::cout << "  安全删除多个: " << prog_name << " --delete a.txt b.txt c.txt -w 3" << std::endl;
-    std::cout << "  输出到指定目录: " << prog_name << " -i secret.txt -p mypass -o D:\\Encrypted" << std::endl;
-    std::cout << "  保留源文件: " << prog_name << " -i secret.txt -p mypass -k" << std::endl;
-    std::cout << "  错 3 次即永久删除: " << prog_name << " -i secret.txt -p mypass -t 3" << std::endl;
-    std::cout << "  错 5 次锁定 7 天:  " << prog_name << " -i secret.txt -p mypass -t 5 -x lock -l 7" << std::endl;
+    std::cout << "  输出到指定目录: " << prog_name << " secret.txt -p mypass -o D:\\Encrypted" << std::endl;
+    std::cout << "  保留源文件: " << prog_name << " secret.txt -p mypass -k" << std::endl;
+    std::cout << "  错 3 次即永久删除: " << prog_name << " secret.txt -p mypass -t 3" << std::endl;
+    std::cout << "  错 5 次锁定 7 天:  " << prog_name << " secret.txt -p mypass -t 5 -x lock -l 7" << std::endl;
     std::cout << "  批量解密:   for %f in (*.enc) do " << prog_name
-              << " -d -i \"%f\" -p mypass -o D:\\Decrypted" << std::endl;
+              << " \"%f\" -p mypass -o D:\\Decrypted" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -298,7 +296,7 @@ int main(int argc, char* argv[]) {
     ConsoleUtf8Scope console_utf8;
     (void)console_utf8;
 #endif
-    // 密码学运算已改用 Windows CNG（bcrypt），无需 OpenSSL 初始化
+    // 密码学运算使用 Windows CNG（bcrypt），无需额外初始化
     
     std::string mode, input_file, password, out_dir;
     bool pwd_provided = false;
@@ -315,13 +313,7 @@ int main(int argc, char* argv[]) {
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = ArgToUtf8(argv[i]);
-        if (arg == "-e" || arg == "-d") {
-            std::cerr << "错误：已不再需要 -e / -d，程序按输入文件后缀自动判断" << std::endl;
-            std::cerr << "      （.enc 结尾 = 解密，其它 = 加密）" << std::endl;
-            return 1;
-        } else if (arg == "-i" && i + 1 < argc) {
-            input_file = ArgToUtf8(argv[++i]);
-        } else if (arg == "-o" && i + 1 < argc) {
+        if (arg == "-o" && i + 1 < argc) {
             out_dir = ArgToUtf8(argv[++i]);
         } else if (arg == "-p" && i + 1 < argc) {
             password = ArgToUtf8(argv[++i]);
@@ -391,9 +383,18 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--delete" || arg == "-D") {
             mode = "--delete";
-        } else if (!arg.empty() && arg[0] != '-' && mode == "--delete") {
-            // --delete 之后的位置参数一律当作要删除的文件（支持一次多个）
-            delete_files.push_back(arg);
+        } else if (!arg.empty() && arg[0] != '-') {
+            // 位置参数：--delete 之后是要删除的文件（可多个），
+            // 否则就是输入文件（不再需要 -i，直接写路径）
+            if (mode == "--delete") {
+                delete_files.push_back(arg);
+            } else if (input_file.empty()) {
+                input_file = arg;
+            } else {
+                std::cerr << "错误：只能指定一个输入文件（多余的：'" << arg << "'）" << std::endl;
+                print_usage(argv[0]);
+                return 1;
+            }
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -412,8 +413,7 @@ int main(int argc, char* argv[]) {
         }
         mode = (input_file.size() >= 4 && input_file.substr(input_file.size() - 4) == ".enc")
                    ? "-d" : "-e";
-        std::cout << "（未指定 -e/-d，按后缀自动判断："
-                  << (mode == "-e" ? "加密" : "解密") << "）" << std::endl;
+
     }
     // --delete 可以用位置参数给文件，所以不强制 -i
     if (mode == "--delete") {
