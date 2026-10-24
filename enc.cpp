@@ -39,6 +39,8 @@ using fe::GetU16; using fe::GetU32; using fe::GetU64;
 #include <unistd.h>
 #endif
 
+#include "cli_i18n.h"
+
 namespace fs = std::filesystem;
 
 // ---------- 跨平台路径与编码 ----------
@@ -137,7 +139,7 @@ std::string get_password(const std::string& prompt, bool confirm, const std::str
     if (confirm) {
         std::string confirm_pwd;
 #ifdef _WIN32
-        std::cout << "再次输入密码: ";
+        std::cout << T("再次输入密码: ");
         char ch2;
         while ((ch2 = _getch()) != '\r') {
             if (ch2 == '\b') {
@@ -157,13 +159,13 @@ std::string get_password(const std::string& prompt, bool confirm, const std::str
         newt2 = oldt2;
         newt2.c_lflag &= ~ECHO;
         tcsetattr(STDIN_FILENO, TCSANOW, &newt2);
-        std::cout << "再次输入密码: ";
+        std::cout << T("再次输入密码: ");
         std::getline(std::cin, confirm_pwd);
         tcsetattr(STDIN_FILENO, TCSANOW, &oldt2);
         std::cout << std::endl;
 #endif
         if (password != confirm_pwd) {
-            throw std::runtime_error("两次输入的密码不一致");
+            throw std::runtime_error(T("两次输入的密码不一致"));
         }
     }
     
@@ -253,40 +255,42 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
     std::cout << std::endl;
 }
 void print_usage(const char* prog_name) {
-    std::cout << "用法: " << prog_name << " <文件> [选项]" << std::endl;
-    std::cout << "                .enc 结尾按解密处理，其它按加密处理" << std::endl;
-    std::cout << "  -o <目录>     输出目录（默认与输入文件同目录）" << std::endl;
-    std::cout << "  -p <密码>     密码（可选）。如不提供，会交互式输入" << std::endl;
-    std::cout << "  -s <强度>     加密强度：fast|standard|secure|extreme（默认 standard）" << std::endl;
-    std::cout << "                对应 PBKDF2 迭代次数 15万 / 30万 / 45万 / 60万" << std::endl;
-    std::cout << "  -w <次数>     源文件处理：0=保留源文件（等同 -k），1-10=删除前覆写次数（默认 3）" << std::endl;
-    std::cout << "  -k, --keep    保留源文件（加密时）/ 加密文件（解密时），不做删除" << std::endl;
-    std::cout << "                说明：解密后的加密文件不含明文残留，删除时不覆写" << std::endl;
-    std::cout << "  --decoy <文件>      可否认加密：指定诱饵文件" << std::endl;
-    std::cout << "  --decoy-pass <密码> 可否认加密：假密码，用它解密得到的是诱饵文件" << std::endl;
-    std::cout << "                      两者必须同时给出；受胁迫时交出假密码即可" << std::endl;
-    std::cout << "                      真实内容进哪个槽是随机的，文件本身看不出哪个是诱饵" << std::endl;
-    std::cout << "  --no-decoy          只写一个槽，文件体积约 1 倍" << std::endl;
-    std::cout << "                      代价：体积会暴露「没有诱饵」，不可否认性减弱" << std::endl;
-    std::cout << "安全删除（只删文件，不加密也不解密）:" << std::endl;
-    std::cout << "  --delete, -D <文件...>  用随机数据覆写后删除；可一次给多个文件" << std::endl;
-    std::cout << "                      覆写次数由 -w 决定（0=直接删除不覆写）" << std::endl;
-    std::cout << "防暴力破解（仅加密时写入文件头）:" << std::endl;
-    std::cout << "  -t, --max-tries <次数>   启用保护：允许的错误尝试次数（1-9999）" << std::endl;
-    std::cout << "  -x, --on-exhaust <动作>  次数用尽后：delete=永久删除文件（默认）," << std::endl;
-    std::cout << "                           lock=禁止解密一段时间" << std::endl;
-    std::cout << "  -l, --lock-days <天数>   lock 模式下的锁定时长（0-3650，默认 7）" << std::endl;
-    std::cout << "示例:" << std::endl;
-    std::cout << "  交互式加密: " << prog_name << " secret.txt" << std::endl;
-    std::cout << "  命令行加密: " << prog_name << " secret.txt -p mypass" << std::endl;
-    std::cout << "  高强度加密: " << prog_name << " secret.txt -p mypass -s extreme" << std::endl;
-    std::cout << "  安全删除文件: " << prog_name << " --delete secret.txt" << std::endl;
-    std::cout << "  安全删除多个: " << prog_name << " --delete a.txt b.txt c.txt -w 3" << std::endl;
-    std::cout << "  输出到指定目录: " << prog_name << " secret.txt -p mypass -o D:\\Encrypted" << std::endl;
-    std::cout << "  保留源文件: " << prog_name << " secret.txt -p mypass -k" << std::endl;
-    std::cout << "  错 3 次即永久删除: " << prog_name << " secret.txt -p mypass -t 3" << std::endl;
-    std::cout << "  错 5 次锁定 7 天:  " << prog_name << " secret.txt -p mypass -t 5 -x lock -l 7" << std::endl;
-    std::cout << "  批量解密:   for %f in (*.enc) do " << prog_name
+    std::cout << T("用法: ") << prog_name << T(" <文件> [选项]") << std::endl;
+    std::cout << T("                .enc 结尾按解密处理，其它按加密处理") << std::endl;
+    std::cout << T("  -o <目录>     输出目录（默认与输入文件同目录）") << std::endl;
+    std::cout << T("  -p <密码>     密码（可选）。如不提供，会交互式输入") << std::endl;
+    std::cout << T("  -s <强度>     加密强度：fast|standard|secure|extreme（默认 standard）") << std::endl;
+    std::cout << T("                对应 PBKDF2 迭代次数 15万 / 30万 / 45万 / 60万") << std::endl;
+    std::cout << T("  -w <次数>     源文件处理：0=保留源文件（等同 -k），1-10=删除前覆写次数（默认 3）") << std::endl;
+    std::cout << T("  -k, --keep    保留源文件（加密时）/ 加密文件（解密时），不做删除") << std::endl;
+    std::cout << T("                说明：解密后的加密文件不含明文残留，删除时不覆写") << std::endl;
+    std::cout << T("  --decoy <文件>      可否认加密：指定诱饵文件") << std::endl;
+    std::cout << T("  --decoy-pass <密码> 可否认加密：假密码，用它解密得到的是诱饵文件") << std::endl;
+    std::cout << T("                      两者必须同时给出；受胁迫时交出假密码即可") << std::endl;
+    std::cout << T("                      真实内容进哪个槽是随机的，文件本身看不出哪个是诱饵") << std::endl;
+    std::cout << T("  --no-decoy          只写一个槽，文件体积约 1 倍") << std::endl;
+    std::cout << T("                      代价：体积会暴露「没有诱饵」，不可否认性减弱") << std::endl;
+    std::cout << T("安全删除（只删文件，不加密也不解密）:") << std::endl;
+    std::cout << T("  --delete, -D <文件...>  用随机数据覆写后删除；可一次给多个文件") << std::endl;
+    std::cout << T("                      覆写次数由 -w 决定（0=直接删除不覆写）") << std::endl;
+    std::cout << T("防暴力破解（仅加密时写入文件头）:") << std::endl;
+    std::cout << T("  -t, --max-tries <次数>   启用保护：允许的错误尝试次数（1-9999）") << std::endl;
+    std::cout << T("  -x, --on-exhaust <动作>  次数用尽后：delete=永久删除文件（默认）,") << std::endl;
+    std::cout << T("                           lock=禁止解密一段时间") << std::endl;
+    std::cout << T("  -l, --lock-days <天数>   lock 模式下的锁定时长（0-3650，默认 7）") << std::endl;
+    std::cout << T("  --lang <zh|en> 输出语言（默认 en）") << std::endl;
+    std::cout << T("  -h, --help    显示帮助") << std::endl;
+    std::cout << T("示例:") << std::endl;
+    std::cout << T("  交互式加密: ") << prog_name << " secret.txt" << std::endl;
+    std::cout << T("  命令行加密: ") << prog_name << " secret.txt -p mypass" << std::endl;
+    std::cout << T("  高强度加密: ") << prog_name << " secret.txt -p mypass -s extreme" << std::endl;
+    std::cout << T("  安全删除文件: ") << prog_name << " --delete secret.txt" << std::endl;
+    std::cout << T("  安全删除多个: ") << prog_name << " --delete a.txt b.txt c.txt -w 3" << std::endl;
+    std::cout << T("  输出到指定目录: ") << prog_name << " secret.txt -p mypass -o D:\\Encrypted" << std::endl;
+    std::cout << T("  保留源文件: ") << prog_name << " secret.txt -p mypass -k" << std::endl;
+    std::cout << T("  错 3 次即永久删除: ") << prog_name << " secret.txt -p mypass -t 3" << std::endl;
+    std::cout << T("  错 5 次锁定 7 天:  ") << prog_name << " secret.txt -p mypass -t 5 -x lock -l 7" << std::endl;
+    std::cout << T("  批量解密:   for %f in (*.enc) do ") << prog_name
               << " \"%f\" -p mypass -o D:\\Decrypted" << std::endl;
 }
 
@@ -313,7 +317,17 @@ int main(int argc, char* argv[]) {
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = ArgToUtf8(argv[i]);
-        if (arg == "-o" && i + 1 < argc) {
+        if ((arg == "--lang" || arg == "-L") && i + 1 < argc) {
+            const std::string v = ArgToUtf8(argv[++i]);
+            if (v == "zh" || v == "zh-cn" || v == "cn" || v == "chinese") {
+                g_zh = true;
+            } else if (v == "en" || v == "english") {
+                g_zh = false;
+            } else {
+                std::cerr << T("错误：--lang 只能是 zh 或 en") << std::endl;
+                return 1;
+            }
+        } else if (arg == "-o" && i + 1 < argc) {
             out_dir = ArgToUtf8(argv[++i]);
         } else if (arg == "-p" && i + 1 < argc) {
             password = ArgToUtf8(argv[++i]);
@@ -324,11 +338,11 @@ int main(int argc, char* argv[]) {
             try {
                 prot.maxTries = std::stoi(ArgToUtf8(argv[++i]));
             } catch (...) {
-                std::cerr << "错误：-t 需要一个整数（允许的错误尝试次数）" << std::endl;
+                std::cerr << T("错误：-t 需要一个整数（允许的错误尝试次数）") << std::endl;
                 return 1;
             }
             if (prot.maxTries < 1 || prot.maxTries > 9999) {
-                std::cerr << "错误：-t 取值范围为 1-9999" << std::endl;
+                std::cerr << T("错误：-t 取值范围为 1-9999") << std::endl;
                 return 1;
             }
             prot.enabled = true;
@@ -337,18 +351,18 @@ int main(int argc, char* argv[]) {
             if (s == "delete")      prot.action = EXHAUST_DELETE;
             else if (s == "lock")   prot.action = EXHAUST_LOCK;
             else {
-                std::cerr << "错误：-x 只能是 delete（永久删除）或 lock（禁止解密）" << std::endl;
+                std::cerr << T("错误：-x 只能是 delete（永久删除）或 lock（禁止解密）") << std::endl;
                 return 1;
             }
         } else if ((arg == "-l" || arg == "--lock-days") && i + 1 < argc) {
             try {
                 prot.lockDays = std::stoi(ArgToUtf8(argv[++i]));
             } catch (...) {
-                std::cerr << "错误：-l 需要一个整数（锁定的天数）" << std::endl;
+                std::cerr << T("错误：-l 需要一个整数（锁定的天数）") << std::endl;
                 return 1;
             }
             if (prot.lockDays < 0 || prot.lockDays > 3650) {
-                std::cerr << "错误：-l 取值范围为 0-3650 天" << std::endl;
+                std::cerr << T("错误：-l 取值范围为 0-3650 天") << std::endl;
                 return 1;
             }
         } else if (arg == "-w" && i + 1 < argc) {
@@ -356,11 +370,11 @@ int main(int argc, char* argv[]) {
             try {
                 overwrite_passes = std::stoi(s);
             } catch (...) {
-                std::cerr << "错误：-w 需要一个整数（0=保留源文件，1/3=覆写次数）" << std::endl;
+                std::cerr << T("错误：-w 需要一个整数（0=保留源文件，1/3=覆写次数）") << std::endl;
                 return 1;
             }
             if (overwrite_passes < 0 || overwrite_passes > 10) {
-                std::cerr << "错误：-w 取值范围为 0-10（推荐 0 / 1 / 3）" << std::endl;
+                std::cerr << T("错误：-w 取值范围为 0-10（推荐 0 / 1 / 3）") << std::endl;
                 return 1;
             }
         } else if ((arg == "--decoy" || arg == "--decoy-file") && i + 1 < argc) {
@@ -378,7 +392,7 @@ int main(int argc, char* argv[]) {
             else if (s == "secure")   strength = STRENGTH_SECURE;
             else if (s == "extreme")  strength = STRENGTH_EXTREME;
             else {
-                std::cerr << "错误：未知强度 '" << s << "'（可选 fast|standard|secure|extreme）" << std::endl;
+                std::cerr << T("错误：未知强度 '") << s << T("'（可选 fast|standard|secure|extreme）") << std::endl;
                 return 1;
             }
         } else if (arg == "--delete" || arg == "-D") {
@@ -391,7 +405,7 @@ int main(int argc, char* argv[]) {
             } else if (input_file.empty()) {
                 input_file = arg;
             } else {
-                std::cerr << "错误：只能指定一个输入文件（多余的：'" << arg << "'）" << std::endl;
+                std::cerr << T("错误：只能指定一个输入文件（多余的：'") << arg << "'）" << std::endl;
                 print_usage(argv[0]);
                 return 1;
             }
@@ -399,7 +413,7 @@ int main(int argc, char* argv[]) {
             print_usage(argv[0]);
             return 0;
         } else {
-            std::cerr << "错误：无法识别的参数 '" << arg << "'" << std::endl;
+            std::cerr << T("错误：无法识别的参数 '") << arg << "'" << std::endl;
             print_usage(argv[0]);
             return 1;
         }
@@ -439,25 +453,25 @@ int main(int argc, char* argv[]) {
                 // 否则会把「没删到」也算成成功
                 std::error_code ec;
                 if (!fs::exists(PathOf(f), ec) || fs::is_directory(PathOf(f), ec)) {
-                    std::cerr << "错误：文件不存在或不是普通文件: " << f << std::endl;
+                    std::cerr << T("错误：文件不存在或不是普通文件: ") << f << std::endl;
                     ++failCount;
                     continue;
                 }
                 if (overwrite_passes > 0) {
-                    std::cout << "正在安全删除（覆写 " << overwrite_passes << " 次）: " << f << std::endl;
+                    std::cout << T("正在安全删除（覆写 ") << overwrite_passes << T(" 次）: ") << f << std::endl;
                 } else {
-                    std::cout << "正在删除: " << f << std::endl;
+                    std::cout << T("正在删除: ") << f << std::endl;
                 }
                 fe::SecureDeleteFile(Utf8ToWide(f), overwrite_passes);
                 ++okCount;
             }
             catch (const std::exception& e) {
-                std::cerr << "错误：删除失败 " << f << " —— " << e.what() << std::endl;
+                std::cerr << T("错误：删除失败 ") << f << " —— " << e.what() << std::endl;
                 ++failCount;
             }
         }
-        std::cout << "完成：成功 " << okCount << " 个";
-        if (failCount > 0) std::cout << "，失败 " << failCount << " 个";
+        std::cout << T("完成：成功 ") << okCount << T(" 个");
+        if (failCount > 0) std::cout << T("，失败 ") << failCount << T(" 个");
         std::cout << std::endl;
         return failCount > 0 ? 1 : 0;
     }
@@ -466,7 +480,7 @@ int main(int argc, char* argv[]) {
     if (!out_dir.empty()) {
         std::error_code ec;
         if (!fs::exists(PathOf(out_dir), ec) || !fs::is_directory(PathOf(out_dir), ec)) {
-            std::cerr << "错误：输出目录不存在或不是目录: " << out_dir << std::endl;
+            std::cerr << T("错误：输出目录不存在或不是目录: ") << out_dir << std::endl;
             return 1;
         }
     }
@@ -475,7 +489,7 @@ int main(int argc, char* argv[]) {
         const bool encrypting = (mode == "-e");
         
         if (!encrypting && (input_file.size() < 4 || input_file.substr(input_file.size() - 4) != ".enc")) {
-            std::cerr << "错误：解密文件应以 .enc 结尾" << std::endl;
+            std::cerr << T("错误：解密文件应以 .enc 结尾") << std::endl;
             return 1;
         }
         
@@ -493,28 +507,28 @@ int main(int argc, char* argv[]) {
         const std::string output = out_path.string();
         
         if (encrypting) {
-            std::cout << "加密文件: " << input_file << std::endl;
+            std::cout << T("加密文件: ") << input_file << std::endl;
             // 如果提供了 -p，直接使用；否则交互式输入（加密需要确认）
-            std::string final_pwd = get_password("输入密码: ", true, pwd_provided ? password : "");
+            std::string final_pwd = get_password(T("输入密码: "), true, pwd_provided ? password : "");
 
             // 可否认加密：给了诱饵文件就必须给假密码，且两者都要
             std::string final_decoy_pwd;
             if (!decoy_file.empty()) {
                 if (!decoy_pwd_provided) {
-                    std::cerr << "错误：使用 --decoy 时必须同时提供 --decoy-pass（假密码）" << std::endl;
+                    std::cerr << T("错误：使用 --decoy 时必须同时提供 --decoy-pass（假密码）") << std::endl;
                     return 1;
                 }
                 std::error_code dec;
                 if (!fs::exists(PathOf(decoy_file), dec)) {
-                    std::cerr << "错误：诱饵文件不存在" << std::endl;
+                    std::cerr << T("错误：诱饵文件不存在") << std::endl;
                     return 1;
                 }
                 if (decoy_password == final_pwd) {
-                    std::cerr << "错误：假密码不能与真密码相同" << std::endl;
+                    std::cerr << T("错误：假密码不能与真密码相同") << std::endl;
                     return 1;
                 }
                 final_decoy_pwd = decoy_password;
-                std::cout << "已启用可否认加密：被胁迫时可交出假密码，解出的是诱饵文件"
+                std::cout << T("已启用可否认加密：被胁迫时可交出假密码，解出的是诱饵文件")
                           << std::endl;
             }
 
@@ -522,23 +536,23 @@ int main(int argc, char* argv[]) {
                          decoy_file, final_decoy_pwd, single_slot);
             if (prot.enabled) {
                 if (prot.action == EXHAUST_LOCK) {
-                    std::cout << "防暴力破解：错误 " << prot.maxTries << " 次后禁止解密 "
-                              << prot.lockDays << " 天" << std::endl;
+                    std::cout << T("防暴力破解：错误 ") << prot.maxTries << T(" 次后禁止解密 ")
+                              << prot.lockDays << T(" 天") << std::endl;
                 } else {
-                    std::cout << "防暴力破解：错误 " << prot.maxTries << " 次后永久删除文件" << std::endl;
+                    std::cout << T("防暴力破解：错误 ") << prot.maxTries << T(" 次后永久删除文件") << std::endl;
                 }
             }
             // 源文件含明文。-k 与 -w 0 都表示保留：
             // -w 0 对应 GUI 设置里的“禁用安全删除”，GUI 那边是保留源文件，
             // 这里必须一致，否则同一个选项在两边行为不同。
             if (keep_source || overwrite_passes == 0) {
-                std::cout << "加密成功，源文件已保留。输出文件: " << output << std::endl;
+                std::cout << T("加密成功，源文件已保留。输出文件: ") << output << std::endl;
             } else {
                 secure_delete(input_file, overwrite_passes);
-                std::cout << "加密成功，源文件已删除。输出文件: " << output << std::endl;
+                std::cout << T("加密成功，源文件已删除。输出文件: ") << output << std::endl;
             }
         } else {
-            std::cout << "解密文件: " << input_file << std::endl;
+            std::cout << T("解密文件: ") << input_file << std::endl;
 
             // ---- 防暴力破解：先看保护状态与锁定情况 ----
             FileState st;
@@ -549,8 +563,8 @@ int main(int argc, char* argv[]) {
                 if (st.lockUntil != 0) {
                     const uint64_t now = NowUnix();
                     if (now < st.lockUntil) {
-                        std::cerr << "错误：该文件已被锁定，剩余 " << FormatDuration(st.lockUntil - now)
-                                  << "（解锁时间由加密时的设置决定）" << std::endl;
+                        std::cerr << T("错误：该文件已被锁定，剩余 ") << FormatDuration(st.lockUntil - now)
+                                  << T("（解锁时间由加密时的设置决定）") << std::endl;
                         return 1;
                     }
                     // 锁定已到期：恢复次数并清除锁定
@@ -558,7 +572,7 @@ int main(int argc, char* argv[]) {
                     WriteMutableState(input_file, remaining, 0);
                     st.remaining = remaining;
                     st.lockUntil = 0;
-                    std::cout << "锁定已到期，剩余尝试次数已重置为 " << remaining << " 次" << std::endl;
+                    std::cout << T("锁定已到期，剩余尝试次数已重置为 ") << remaining << T(" 次") << std::endl;
                 }
             }
 
@@ -567,7 +581,7 @@ int main(int argc, char* argv[]) {
             if (haveState && st.isProtected) {
                 for (;;) {
                     const std::string prompt =
-                        "输入密码（还能尝试 " + std::to_string(remaining) + " 次）: ";
+                        T("输入密码（还能尝试 ") + std::to_string(remaining) + T(" 次）: ");
                     const std::string tryPwd = pwd_provided ? password : get_password(prompt, false, "");
 
                     FileState cur = st;
@@ -576,7 +590,7 @@ int main(int argc, char* argv[]) {
 
                     std::string msg;
                     const int left = ConsumeAttempt(input_file, cur, msg);
-                    std::cerr << "密码错误。" << msg << std::endl;
+                    std::cerr << T("密码错误。") << msg << std::endl;
                     if (left <= 0) return 1;
                     remaining = left;
                     // 用了 -p 就没法再问用户，直接失败退出
@@ -584,21 +598,21 @@ int main(int argc, char* argv[]) {
                 }
             }
             else {
-                final_pwd = get_password("输入密码: ", false, pwd_provided ? password : "");
+                final_pwd = get_password(T("输入密码: "), false, pwd_provided ? password : "");
             }
 
             decrypt_file(input_file, output, final_pwd);
             // 加密文件本身是密文、不含明文残留，因此不做覆写，直接删除（与 GUI 一致）；
             // 同样地，-k 或 -w 0 表示保留
             if (keep_source || overwrite_passes == 0) {
-                std::cout << "解密成功，加密文件已保留。输出文件: " << output << std::endl;
+                std::cout << T("解密成功，加密文件已保留。输出文件: ") << output << std::endl;
             } else {
                 secure_delete(input_file, 0);
-                std::cout << "解密成功，加密文件已删除。输出文件: " << output << std::endl;
+                std::cout << T("解密成功，加密文件已删除。输出文件: ") << output << std::endl;
             }
         }
     } catch (const std::exception& e) {
-        std::cerr << "错误: " << e.what() << std::endl;
+        std::cerr << T("错误: ") << e.what() << std::endl;
         return 1;
     }
     

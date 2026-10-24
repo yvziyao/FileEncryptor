@@ -291,6 +291,7 @@ enc file.txt.enc -p yourpassword -o D:\Decrypted -k
 | `--decoy-pass <pwd>` | **Deniable encryption**: the fake password that opens the decoy |
 | `--no-decoy` | Write a single slot, ~1x the size (default 2x). The trade-off is that the size reveals "no decoy" |
 | `--delete` / `-D <files...>` | **Secure delete**: only deletes, no encrypt/decrypt; multiple files allowed, pass count via `-w` |
+| `--lang <zh\|en>` | Output language, default `en`. Use `--lang zh` for Chinese |
 | `-h` / `--help` | Show help |
 
 > Output names are derived automatically: `.enc` is appended when encrypting and removed when decrypting.
