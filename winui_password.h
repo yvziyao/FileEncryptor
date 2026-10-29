@@ -1,4 +1,4 @@
-﻿// Wrapper for WinUI password dialog. If WINUI_AVAILABLE is not defined, falls back to existing Win32 dialog.
+// Wrapper for WinUI password dialog. If WINUI_AVAILABLE is not defined, falls back to existing Win32 dialog.
 #pragma once
 
 #include <windows.h>
@@ -9,10 +9,14 @@ struct UiProtection;
 
 // subtitle 非空时显示在标题下方（批量处理时用于指明当前文件）。
 // showProtection/ioProt 仅用于加密（设置密码）；remainTries 仅用于解密（<0 表示不显示）。
+// ioGenerated 返回密码是否由「随机生成」按钮填入（调用方据此额外提醒用户保存）。
 bool ShowPasswordDialogWinUI(HWND parent, std::string& password, bool confirm,
                              const std::wstring& subtitle = std::wstring(),
                              bool showProtection = false,
                              UiProtection* ioProt = nullptr,
                              int remainTries = -1,
                              bool showDecoy = false,
-                             bool* ioUseDecoy = nullptr);
+                             bool* ioUseDecoy = nullptr,
+                             bool* ioGenerated = nullptr,
+                             const std::string& initialPassword = std::string(),
+                             bool initialGenerated = false);

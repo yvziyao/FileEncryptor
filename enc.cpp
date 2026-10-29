@@ -278,6 +278,10 @@ void print_usage(const char* prog_name) {
     std::cout << T("  -x, --on-exhaust <动作>  次数用尽后：delete=永久删除文件（默认）,") << std::endl;
     std::cout << T("                           lock=禁止解密一段时间") << std::endl;
     std::cout << T("  -l, --lock-days <天数>   lock 模式下的锁定时长（0-3650，默认 7）") << std::endl;
+    std::cout << T("随机生成密码（加密时，可代替 -p）:") << std::endl;
+    std::cout << T("  --gen, -g        生成一个随机密码并显示，回车后开始加密") << std::endl;
+    std::cout << T("  --gen-len <n>    密码长度（4-128，默认 20）") << std::endl;
+    std::cout << T("  --gen-sets <list> 包含的字符类别：upper,lower,digits,symbols（默认全含）") << std::endl;
     std::cout << T("  --lang <zh|en> 输出语言（默认 en）") << std::endl;
     std::cout << T("  -h, --help    显示帮助") << std::endl;
     std::cout << T("示例:") << std::endl;
@@ -314,10 +318,42 @@ int main(int argc, char* argv[]) {
     bool single_slot = false;   // --no-decoy：只写一个槽，体积约 1 倍
     // 安全删除模式（--delete）的文件列表：支持一次删多个
     std::vector<std::string> delete_files;
+    // 随机生成密码（与 -p 互斥）
+    bool gen_password = false;
+    int  gen_len = 20;
+    fe::PasswordRules gen_rules;
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = ArgToUtf8(argv[i]);
-        if ((arg == "--lang" || arg == "-L") && i + 1 < argc) {
+        if (arg == "--gen" || arg == "-g") {
+            gen_password = true;
+        } else if ((arg == "--gen-len") && i + 1 < argc) {
+            try { gen_len = std::stoi(ArgToUtf8(argv[++i])); }
+            catch (...) { std::cerr << T("错误：--gen-len 需要一个整数") << std::endl; return 1; }
+            if (gen_len < 4 || gen_len > 128) {
+                std::cerr << T("错误：--gen-len 取值范围为 4-128") << std::endl;
+                return 1;
+            }
+        } else if ((arg == "--gen-sets") && i + 1 < argc) {
+            const std::string sets = ArgToUtf8(argv[++i]);
+            gen_rules.upper = gen_rules.lower = gen_rules.digits = gen_rules.symbols = false;
+            std::string cur;
+            std::string all = sets + ",";
+            for (char ch : all) {
+                if (ch == ',') {
+                    if (cur == "upper")  gen_rules.upper = true;
+                    else if (cur == "lower")  gen_rules.lower = true;
+                    else if (cur == "digits") gen_rules.digits = true;
+                    else if (cur == "symbols") gen_rules.symbols = true;
+                    else if (!cur.empty()) {
+                        std::cerr << T("错误：--gen-sets 只接受 upper,lower,digits,symbols") << std::endl;
+                        return 1;
+                    }
+                    cur.clear();
+                }
+                else if (ch != ' ') { cur += ch; }
+            }
+        } else if ((arg == "--lang" || arg == "-L") && i + 1 < argc) {
             const std::string v = ArgToUtf8(argv[++i]);
             if (v == "zh" || v == "zh-cn" || v == "cn" || v == "chinese") {
                 g_zh = true;
@@ -485,6 +521,29 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    // ---- 随机生成密码（与 -p 互斥）----
+    if (gen_password) {
+        if (pwd_provided) {
+            std::cerr << T("错误：--gen 与 -p 不能同时使用") << std::endl;
+            return 1;
+        }
+        if (mode != "-e") {
+            std::cerr << T("错误：--gen 只能用于加密（解密需要你已知的密码）") << std::endl;
+            return 1;
+        }
+        gen_rules.length = gen_len;
+        const std::string gp = fe::GeneratePassword(gen_rules);
+        std::cout << std::endl;
+        std::cout << T("已生成随机密码（请立即妥善保存）:") << std::endl;
+        std::cout << "    " << gp << std::endl << std::endl;
+        std::cout << T("按回车开始加密，Ctrl+C 取消...");
+        std::cout.flush();
+        std::string dummy;
+        std::getline(std::cin, dummy);
+        password = gp;
+        pwd_provided = true;
+    }
+
     try {
         const bool encrypting = (mode == "-e");
         

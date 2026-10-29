@@ -27,6 +27,15 @@ struct AppSettings {
     // 禁用诱饵文件：加密时只写一个槽，体积约 1 倍。
     // 代价是文件大小会暴露「没有诱饵」，不可否认性减弱。
     bool             decoyDisabled = false;
+
+    // ---- 随机密码生成器 ----
+    // 密码框旁「随机生成」按钮用这些规则。位数 4-128，
+    // 四类字符可分别勾选（全不选时回退为只用小写）。
+    int              pwGenLength  = 20;
+    bool             pwGenUpper   = true;
+    bool             pwGenLower   = true;
+    bool             pwGenDigits  = true;
+    bool             pwGenSymbols = true;
 };
 
 // 全局单例

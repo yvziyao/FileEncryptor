@@ -88,4 +88,16 @@ uint64_t NowUnix();
 // 测试用：暴露槽位分配，便于验证随机性（不影响安全性）
 void SetSlotChoiceForTest(int fixedSlot);   // -1 = 恢复随机
 
+// ---- 随机密码生成（GUI 与 CLI 共用一份实现）----
+// 用系统的 CSPRNG（BCryptGenRandom）+ 拒绝采样避免取模偏差，
+// 并保证"每一类最少出现一次"，最后打乱位置。
+struct PasswordRules {
+    int  length  = 20;
+    bool upper   = true;
+    bool lower   = true;
+    bool digits  = true;
+    bool symbols = true;
+};
+std::string GeneratePassword(const PasswordRules& r);
+
 } // namespace fe

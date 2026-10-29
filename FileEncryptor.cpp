@@ -394,10 +394,14 @@ bool ShowPasswordDialog(HWND hWnd, std::string& password, bool confirm,
                         UiProtection* ioProt = nullptr,
                         int remainTries = -1,
                         bool showDecoy = false,
-                        bool* ioUseDecoy = nullptr) {
+                        bool* ioUseDecoy = nullptr,
+                        bool* ioGenerated = nullptr,
+                        const std::string& initialPassword = std::string(),
+                        bool initialGenerated = false) {
     return ShowPasswordDialogWinUI(hWnd, password, confirm, subtitle,
                                    showProtection, ioProt, remainTries,
-                                   showDecoy, ioUseDecoy);
+                                   showDecoy, ioUseDecoy, ioGenerated,
+                                   initialPassword, initialGenerated);
 }
 
 
@@ -2074,9 +2078,41 @@ static bool CollectEncryptPassword(HWND owner, const std::wstring& subtitle,
     ui.lockDays = 7;
 
     bool useDecoy = false;
-    if (!ShowPasswordDialog(owner, outPwd, true, subtitle, allowProtection, &ui,
-                            -1, allowDecoy, &useDecoy))
-        return false;
+    // 密码是随机生成时，关掉对话框前必须让用户确认「已保存」——
+    // 点「返回」就重新打开设置密码界面，而不是直接开始加密。
+    std::string prevPwd;      // 上一次生成/输入的密码，供「返回」后回填
+    bool        prevGenerated = false;
+    for (;;) {
+        bool generated = false;
+        if (!ShowPasswordDialog(owner, outPwd, true, subtitle, allowProtection, &ui,
+                                -1, allowDecoy, &useDecoy, &generated,
+                                prevPwd, prevGenerated))
+            return false;
+
+        if (!generated || outPwd.empty()) break;
+
+        const std::wstring wpwd(outPwd.begin(), outPwd.end());
+        UiMessage m;
+        m.icon = UiIcon::Warning;
+        m.caption = tr(L"请保存这个密码", L"Save this password");
+        // tr() 只接受 const wchar_t*，所以先拼好再传 c_str()
+        const std::wstring zhText =
+            L"以下是为本次加密随机生成的密码，请立即妥善保存。\n"
+            L"忘记密码将无法解密，且无法找回。";
+        const std::wstring enText =
+            L"This password was randomly generated for this encryption. "
+            L"Store it safely now.\n"
+            L"Without it the file cannot be decrypted, and it cannot be recovered.";
+        m.text = tr(zhText.c_str(), enText.c_str());
+        m.selectable = wpwd;    // 只读、可选中、可 Ctrl+C 复制
+        m.buttons = MB_OKCANCEL;
+        m.labels = { tr(L"我已保存", L"I saved it"), tr(L"返回", L"Back") };
+        m.topmost = true;
+        if (UiShowMessage(owner, m) == IDOK) break;
+        // 取消：回到设置密码界面，并带上刚才那个密码（否则用户再也拿不到它）
+        prevPwd = outPwd;
+        prevGenerated = true;
+    }
 
     outProt.enabled = ui.enabled;
     outProt.maxTries = ui.maxTries;
@@ -2656,6 +2692,12 @@ static void ShowSettingsDialog(HWND owner) {
     d.strength     = (int)s.strength;
     d.decoyDisabled = s.decoyDisabled ? 1 : 0;
     d.keepSource   = s.keepSource ? 1 : 0;
+    // 随机密码生成器
+    d.pwGenLength  = s.pwGenLength;
+    d.pwGenUpper   = s.pwGenUpper   ? 1 : 0;
+    d.pwGenLower   = s.pwGenLower   ? 1 : 0;
+    d.pwGenDigits  = s.pwGenDigits  ? 1 : 0;
+    d.pwGenSymbols = s.pwGenSymbols ? 1 : 0;
     d.shellMenu    = s.shellMenu ? 1 : 0;
 
     if (!UiShowSettings(owner, d)) return;
@@ -2670,6 +2712,11 @@ static void ShowSettingsDialog(HWND owner) {
     w.strength     = (StrengthMode)d.strength;
     w.decoyDisabled = (d.decoyDisabled != 0);
     w.keepSource = (d.keepSource != 0);
+    w.pwGenLength  = d.pwGenLength;
+    w.pwGenUpper   = (d.pwGenUpper   != 0);
+    w.pwGenLower   = (d.pwGenLower   != 0);
+    w.pwGenDigits  = (d.pwGenDigits  != 0);
+    w.pwGenSymbols = (d.pwGenSymbols != 0);
     w.shellMenu  = (d.shellMenu != 0);
     SettingsSave();
 

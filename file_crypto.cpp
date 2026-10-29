@@ -1,4 +1,4 @@
-﻿// file_crypto.cpp - 加解密核心的唯一实现（CLI 与 GUI 共用）
+// file_crypto.cpp - 加解密核心的唯一实现（CLI 与 GUI 共用）
 #include "file_crypto.h"
 #include "file_format.h"
 
@@ -230,6 +230,7 @@ uint8_t RandByte() {
     return b;
 }
 
+
 std::vector<uint8_t> DeriveKey(const std::string& password,
                                const uint8_t* salt, size_t saltLen, int iterations) {
     AlgGuard alg;
@@ -388,6 +389,58 @@ void DecryptSegment(HANDLE hIn, uint64_t offset, uint64_t cipherLen,
 }
 
 } // namespace
+
+// ---- 随机密码生成（对外导出，GUI 与 CLI 共用）----
+// 从字符集里取一个字符。用拒绝采样而不是 rand()%n，
+// 否则字符集长度不是 256 的约数时会出现取模偏差（某些字符更常出现）。
+static char PickFrom(const char* set) {
+    const size_t n = strlen(set);
+    if (n == 0) return '\0';
+    // 注意用 size_t：若写成 uint8_t，(256 - 0) 会被截断成 0 而变成死循环
+    const size_t limit = 256u - (256u % n);
+    uint8_t b = 0;
+    do { RandBytes(&b, 1); } while ((size_t)b >= limit);
+    return set[b % n];
+}
+
+std::string GeneratePassword(const PasswordRules& r) {
+    static const char* kUpper   = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    static const char* kLower   = "abcdefghijklmnopqrstuvwxyz";
+    static const char* kDigits  = "0123456789";
+    // 特殊符号里刻意避开引号、反斜杠、空格、$ 等会折磨命令行和配置文件的字符
+    static const char* kSymbols = "!@#%^&*()-_=+[]{}:;,.?/";
+
+    std::string pool;
+    if (r.upper)   pool += kUpper;
+    if (r.lower)   pool += kLower;
+    if (r.digits)  pool += kDigits;
+    if (r.symbols) pool += kSymbols;
+    if (pool.empty()) pool = kLower;              // 全都不选时兜底：小写
+
+    int len = r.length;
+    if (len < 4)   len = 4;
+    if (len > 128) len = 128;
+
+    std::string out;
+    // 每一类先各出一个，保证不会出现"选了数字但一个都没有"
+    if (r.upper)   out += PickFrom(kUpper);
+    if (r.lower)   out += PickFrom(kLower);
+    if (r.digits)  out += PickFrom(kDigits);
+    if (r.symbols) out += PickFrom(kSymbols);
+
+    if ((int)out.size() > len) out.resize(len);
+    while ((int)out.size() < len) out += PickFrom(pool.c_str());
+
+    // 打乱：否则前几个字符的类别是固定的
+    for (size_t i = out.size(); i > 1; --i) {
+        const size_t n = i;
+        const size_t limit = 256u - (256u % n);
+        uint8_t b = 0;
+        do { RandBytes(&b, 1); } while ((size_t)b >= limit);
+        std::swap(out[i - 1], out[b % n]);
+    }
+    return out;
+}
 
 uint64_t NowUnix() { return (uint64_t)std::time(nullptr); }
 

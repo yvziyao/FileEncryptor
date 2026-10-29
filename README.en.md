@@ -139,6 +139,16 @@ For Windows 10/11, with a clean graphical interface.
   * **Disable decoy**: writes a single slot, ~1x the size instead of 2x — the trade-off is that the size reveals "no decoy"
 * **Modern UI**: hand-drawn WinUI 3 style interface, rounded controls, hover and progress animations, dark mode
 * **Password strength meter**: live color grading (very weak / weak / good / strong)
+* **Random password generation**: a "Generate" button sits at the right of the password field.
+  It creates a 20-character password (uppercase + lowercase + digits + symbols), fills both the
+  password and confirm fields, switches to plaintext and selects it all so Ctrl+C just works.
+  After you confirm, one more dialog shows the password in a separate **read-only, selectable**
+  box (click it and everything is selected, so Ctrl+C just works). It has "I saved it" and "Back"
+  buttons; "Back" returns to the password dialog with the same password **prefilled and still in
+  plaintext**, so it is never lost
+* **Generator rules are configurable** (Settings): length 4-128 and four character classes.
+  A short length or too few classes shows a yellow "may reduce security" warning, and an
+  out-of-range length shows a red "length must be between 4 and 128" error
 * **Fully portable**: a single EXE, no extra DLLs
 
 > Settings are stored in the registry under `HKCU\Software\FileEncryptor`.
@@ -290,6 +300,9 @@ enc file.txt.enc -p yourpassword -o D:\Decrypted -k
 | `--decoy <file>` | **Deniable encryption**: specify a decoy file to hand over under coercion |
 | `--decoy-pass <pwd>` | **Deniable encryption**: the fake password that opens the decoy |
 | `--no-decoy` | Write a single slot, ~1x the size (default 2x). The trade-off is that the size reveals "no decoy" |
+| `--gen` / `-g` | **Generate a random password** (mutually exclusive with `-p`); shown, then Enter starts encrypting |
+| `--gen-len <n>` | Generated password length, 4-128, default 20 |
+| `--gen-sets <list>` | Character classes: `upper,lower,digits,symbols` (all by default) |
 | `--delete` / `-D <files...>` | **Secure delete**: only deletes, no encrypt/decrypt; multiple files allowed, pass count via `-w` |
 | `--lang <zh\|en>` | Output language, default `en`. Use `--lang zh` for Chinese |
 | `-h` / `--help` | Show help |

@@ -81,6 +81,16 @@ void SettingsLoad() {
 
     s.strength = ClampEnum<StrengthMode>(RegGetDword(L"Strength", 1), 3, StrengthMode::Standard);
     s.decoyDisabled = RegGetDword(L"DecoyDisabled", 0) != 0;
+
+    // 随机密码生成器
+    DWORD gl = RegGetDword(L"PwGenLength", 20);
+    if (gl < 4)   gl = 4;
+    if (gl > 128) gl = 128;
+    s.pwGenLength  = (int)gl;
+    s.pwGenUpper   = RegGetDword(L"PwGenUpper",   1) != 0;
+    s.pwGenLower   = RegGetDword(L"PwGenLower",   1) != 0;
+    s.pwGenDigits  = RegGetDword(L"PwGenDigits",  1) != 0;
+    s.pwGenSymbols = RegGetDword(L"PwGenSymbols", 1) != 0;
 }
 
 void SettingsSave() {
@@ -93,6 +103,11 @@ void SettingsSave() {
     RegSetDword(L"Completion", (DWORD)s.completion);
     RegSetDword(L"Strength", (DWORD)s.strength);
     RegSetDword(L"DecoyDisabled", s.decoyDisabled ? 1 : 0);
+    RegSetDword(L"PwGenLength",  (DWORD)s.pwGenLength);
+    RegSetDword(L"PwGenUpper",   s.pwGenUpper   ? 1 : 0);
+    RegSetDword(L"PwGenLower",   s.pwGenLower   ? 1 : 0);
+    RegSetDword(L"PwGenDigits",  s.pwGenDigits  ? 1 : 0);
+    RegSetDword(L"PwGenSymbols", s.pwGenSymbols ? 1 : 0);
     RegSetDword(L"KeepSource", s.keepSource ? 1 : 0);
     RegSetDword(L"ShellMenu", s.shellMenu ? 1 : 0);
 }

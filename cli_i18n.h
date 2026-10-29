@@ -94,6 +94,17 @@ static const char* T(const char* zh) {
         { "错误：文件不存在或不是普通文件: ", "Error: file does not exist or is not a regular file: " },
         { "错误：删除失败 ", "Error: failed to delete " },
         { "错误：--lang 只能是 zh 或 en", "Error: --lang must be zh or en" },
+        { "错误：--gen-len 需要一个整数", "Error: --gen-len needs an integer" },
+        { "错误：--gen-len 取值范围为 4-128", "Error: --gen-len must be between 4 and 128" },
+        { "错误：--gen-sets 只接受 upper,lower,digits,symbols", "Error: --gen-sets accepts only upper,lower,digits,symbols" },
+        { "错误：--gen 与 -p 不能同时使用", "Error: --gen cannot be combined with -p" },
+        { "错误：--gen 只能用于加密（解密需要你已知的密码）", "Error: --gen only applies to encryption (decryption needs a password you already know)" },
+        { "已生成随机密码（请立即妥善保存）:", "Generated a random password (save it now):" },
+        { "按回车开始加密，Ctrl+C 取消...", "Press Enter to start encrypting, Ctrl+C to cancel..." },
+        { "随机生成密码（加密时，可代替 -p）:", "Random password (encryption only; use instead of -p):" },
+        { "  --gen, -g        生成一个随机密码并显示，回车后开始加密", "  --gen, -g        generate a random password, show it, start on Enter" },
+        { "  --gen-len <n>    密码长度（4-128，默认 20）", "  --gen-len <n>    password length (4-128, default 20)" },
+        { "  --gen-sets <list> 包含的字符类别：upper,lower,digits,symbols（默认全含）", "  --gen-sets <list> character classes: upper,lower,digits,symbols (all by default)" },
     };
     auto it = kEn.find(std::string(zh));
     return (it == kEn.end()) ? zh : it->second;

@@ -13,11 +13,13 @@
 #include "winui_dialog.h"
 #include "ui_theme.h"
 #include "app_settings.h"
+#include "file_crypto.h"   // 随机密码生成（与 CLI 共用）
 #include "FileEncryptor_helpers.h"
 
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <windowsx.h>
 #include <string>
 #include <vector>
 
@@ -39,6 +41,9 @@ std::wstring PickFolderDialog(HWND owner, const std::wstring& initial);
 #define IDC_UI_DAYS     2006
 #define IDC_UI_CHK_DECOY 2007   // 可否认加密：使用诱饵文件
 #define IDC_UI_PASSES    2008   // 设置：安全删除覆写次数（数字输入框）
+#define IDC_GEN_PWD      2009   // 密码框：随机生成按钮（自绘，不是真控件）
+#define IDC_UI_GENLEN    2010   // 设置：随机密码位数
+#define IDC_SELECTABLE   2011   // 消息框：可选中复制的只读文本框
 
 // 设置里「双击赞助」打开的页面（站点地址如需变更，改这一行即可）。
 // #donate 对应 index.html 里的捐助区块。
@@ -122,11 +127,14 @@ COLORREF IconColor(UiIcon icon) {
 }
 
 void PlayDialogSound(UiIcon icon) {
+    // 只有警告 / 错误 / 询问才发声。
+    // 普通提示（Information，比如“加密成功”）一律静音 ——
+    // 正常工作消息不该打扰用户，这也是现代应用的普遍做法。
     switch (icon) {
     case UiIcon::Error:    MessageBeep(MB_ICONERROR); break;
     case UiIcon::Warning:  MessageBeep(MB_ICONWARNING); break;
     case UiIcon::Question: MessageBeep(MB_ICONQUESTION); break;
-    default:               MessageBeep(MB_ICONINFORMATION); break;
+    default:               break;   // Information：静音
     }
 }
 
@@ -190,6 +198,9 @@ int MeasureLineWidth(HDC dc, HFONT font, const std::wstring& s) {
 
 // 对话框动画：入场淡入 + 按钮悬停渐变，共用一个 15ms 定时器
 static int g_modalDepth = 0;   // 当前打开的模态对话框层数
+// 用户无视弹窗（切回主窗口）时的注意力提示定时器 ID
+#define DLG_ATTENTION_TIMER 2
+#define DLG_SHAKE_TIMER     3   // 弹窗「晃几下」用的高速定时器（30ms 一步）
 #define DLG_ANIM_TIMER 1
 #define DLG_ANIM_MS    15
 // 选中底色滑动：固定时长，与跨几个选项无关（缓动曲线用 UiEaseOutCubic）
@@ -230,6 +241,28 @@ struct UiDlgState {
     // 设置面板：「加密后保留源文件」复选框
     int               keepSource = 0;
     RECT              rKeepBox{}, rKeepLabel{};
+
+    // 密码框右侧的「随机生成」按钮（仅加密时显示）
+    bool              showGenButton = false;
+    RECT              rGenBtn{};
+    bool              passwordGenerated = false;   // 本次密码由生成器填入
+    // 设置面板：随机密码生成器（4 个类别复选框 + 位数输入框 + 弱提示）
+    bool              genUpper = true, genLower = true, genDigits = true, genSymbols = true;
+    RECT              rGenBox[4]{}, rGenLabel[4]{};
+    int               genLen = 20;
+    RECT              rGenLenLabel{}, rGenLenEdit{};
+    HWND              editGenLen = nullptr;
+    RECT              rGenHint{};
+    std::wstring      genHintText;
+    bool              genLenError = false;   // 位数超出 4-128（红色提示优先于黄色弱提示）
+    // 弹窗强调：被用户无视时左右晃几下（比闪任务栏直观，且不依赖标题栏/任务栏）
+    POINT             shakeBase{};
+    int               shakeLeft = -1;   // -1 = 没有在晃
+    // 消息框里「可选中复制」的一行（随机密码用）
+    std::wstring      selectableText;
+    bool              hasSelectable = false;
+    RECT              rSelectable{};
+    HWND              editSelectable = nullptr;
     // 设置面板左下角的「双击赞助」小按钮
     RECT              rSponsor{};
     ULONGLONG         sponsorLastClick = 0;
@@ -382,6 +415,37 @@ std::wstring DecoyChkLabel() {
     return tr(L"禁用诱饵文件（加密后体积不再翻倍）", L"Disable decoy (no size doubling)");
 }
 // 「加密后保留源文件」复选框文案
+// 随机密码生成器：4 个类别复选框的文字
+std::wstring GenClassLabel(int i) {
+    switch (i) {
+    case 0:  return tr(L"大写字母", L"Uppercase");
+    case 1:  return tr(L"小写字母", L"Lowercase");
+    case 2:  return tr(L"数字", L"Digits");
+    default: return tr(L"特殊符号", L"Symbols");
+    }
+}
+std::wstring GenLenLabel() { return tr(L"随机密码位数", L"Generated password length"); }
+
+// 按当前位数与类别数决定是否显示黄色弱提示。
+// 规则：位数 < 12，或只勾了 1 类（甚至 0 类），都算偏弱。
+void UpdateGenHint(UiDlgState* st) {
+    // 超出范围是硬错误，优先显示（红色）；否则再看是否偏弱（黄色）
+    if (st->genLenError) {
+        st->genHintText = tr(L"位数需在 4-128 之间", L"Length must be between 4 and 128");
+        return;
+    }
+    const int classes = (st->genUpper ? 1 : 0) + (st->genLower ? 1 : 0) +
+                        (st->genDigits ? 1 : 0) + (st->genSymbols ? 1 : 0);
+    if (st->genLen < 12 || classes <= 1) {
+        st->genHintText = tr(
+            L"位数偏短或字符类别过少，可能降低安全性",
+            L"Short length or too few character classes may reduce security");
+    }
+    else {
+        st->genHintText.clear();
+    }
+}
+
 std::wstring KeepChkLabel() {
     return tr(L"加/解密后保留源文件（不删除）", L"Keep source files after encrypting/decrypting");
 }
@@ -517,6 +581,35 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         st->rMenuLabel = { st->rMenuBox.right + UiPx(8), y,
                            st->rMenuBox.right + UiPx(8) + lw, y + chkH };
         y += chkH + rowGap;
+    }
+
+    // ---- 随机密码生成器：4 个类别复选框（一行）+ 位数输入框 + 弱提示 ----
+    {
+        HFONT fBody = UiFont(UiPx(14), false);
+        const int boxW = UiPx(18);
+        const int chkH = UiPx(26);
+        int x = st->contentX;
+        for (int i = 0; i < 4; ++i) {
+            const int boxTop = y + (chkH - boxW) / 2;
+            st->rGenBox[i] = { x, boxTop, x + boxW, boxTop + boxW };
+            int lw = 0, lh = 0;
+            MeasureText(dc, fBody, GenClassLabel(i), UiPx(220), true, &lw, &lh);
+            st->rGenLabel[i] = { x + boxW + UiPx(6), y, x + boxW + UiPx(6) + lw, y + chkH };
+            x = st->rGenLabel[i].right + UiPx(18);
+        }
+        y += chkH + UiPx(6);
+
+        st->rGenLenLabel = { st->contentX, y, st->contentX + labelW, y + rowH };
+        const int editW = UiPx(72);
+        const int editH = UiPx(28);
+        const int editTop = y + (rowH - editH) / 2;
+        st->rGenLenEdit = { st->contentX + labelW + UiPx(16), editTop,
+                            st->contentX + labelW + UiPx(16) + editW, editTop + editH };
+        y += rowH + UiPx(4);
+        // 提示行始终占位：有提示时窗口尺寸不跳动
+        st->rGenHint = { st->contentX + labelW + UiPx(16), y,
+                         st->contentX + st->contentW, y + hintH };
+        y += hintH + UiPx(6);
     }
 
     // 左下角留一个「双击赞助」的小按钮（右侧的确定/取消由 PositionButtons 右对齐）。
@@ -666,6 +759,14 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
         st->rLabel1 = { st->contentX, y, st->contentX + st->contentW, y + labelH };
         y += labelH + UiPx(4);
         st->rEdit1 = { st->contentX, y, st->contentX + st->contentW, y + st->editH };
+        if (st->showGenButton) {
+            // 按钮嵌在输入框右端内部，所以下面还要把 EDIT 的可视区往左收
+            const int genW = UiPx(92);
+            st->rGenBtn = { st->rEdit1.right - genW - UiPx(6),
+                            st->rEdit1.top + UiPx(5),
+                            st->rEdit1.right - UiPx(6),
+                            st->rEdit1.bottom - UiPx(5) };
+        }
         y += st->editH + gap;
 
         if (st->confirm) {
@@ -773,7 +874,17 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
     else {
         if (!st->caption.empty() || hasIcon) y += st->titleH + UiPx(10);
         st->rBody = { st->contentX, y, st->contentX + st->contentW, y + bodyH };
-        y += bodyH + UiPx(24);
+        y += bodyH + UiPx(10);
+
+        // 「可选中复制」的行（随机密码）：正文下面放一个只读编辑框
+        if (st->hasSelectable) {
+            st->rSelectable = { st->contentX, y, st->contentX + st->contentW, y + UiPx(30) };
+            y += UiPx(30) + UiPx(14);
+        }
+        else {
+            st->rSelectable = {};
+            y += UiPx(14);
+        }
     }
 
     st->btnArea = { st->pad, y, winW - st->pad, y + st->btnH };
@@ -794,6 +905,10 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
     };
     st->rEdit1Inner = innerOf(st->rEdit1);
     st->rEdit2Inner = innerOf(st->rEdit2);
+    if (st->showGenButton) {
+        // 给右边的「随机生成」按钮让出位置，否则文字会压在按钮下面
+        st->rEdit1Inner.right = st->rGenBtn.left - UiPx(6);
+    }
 
     if (hasIcon) {
         st->iconX = st->pad;
@@ -1194,6 +1309,43 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 
+    // 随机密码生成器：4 个类别复选框
+    for (int i = 0; i < 4; ++i) {
+        if (IsRectEmpty(&st->rGenBox[i])) continue;
+        const bool on = (i == 0) ? st->genUpper : (i == 1) ? st->genLower
+                       : (i == 2) ? st->genDigits : st->genSymbols;
+        if (on) {
+            UiDrawRoundRect(dc, st->rGenBox[i], UiPx(4), true, c.accent, false, c.accent);
+            HFONT iconFont = UiIconFont(UiPx(11));
+            if (iconFont) {
+                RECT gr = st->rGenBox[i];
+                UiDrawTextLine(dc, L"\uE73E", gr, iconFont, c.onAccent,
+                               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+        else {
+            UiDrawRoundRect(dc, st->rGenBox[i], UiPx(4), true, c.bgAlt, true, c.border);
+        }
+        RECT lr = st->rGenLabel[i];
+        UiDrawTextLine(dc, GenClassLabel(i), lr, fBody, c.text,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // 位数：标签 + 输入框 + 黄色弱提示
+    if (!IsRectEmpty(&st->rGenLenLabel)) {
+        RECT ll = st->rGenLenLabel;
+        UiDrawTextLine(dc, GenLenLabel(), ll, fBody, c.text,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        RECT well = st->rGenLenEdit;
+        InflateRect(&well, UiPx(3), UiPx(3));
+        UiDrawRoundRect(dc, well, UiPx(5), true, c.bgAlt, true, c.border);
+        if (!st->genHintText.empty()) {
+            const COLORREF hintColor = st->genLenError ? c.danger : WarningColor();
+            UiDrawTextLine(dc, st->genHintText, st->rGenHint, fSmall, hintColor,
+                           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    }
+
     // 左下角「双击赞助」：不做成独立控件，直接自绘一个低调的小胶囊
     if (!IsRectEmpty(&st->rSponsor)) {
         UiDrawRoundRect(dc, st->rSponsor, UiPx(6), true, c.bgAlt, true, c.border);
@@ -1246,8 +1398,23 @@ void PaintNormalDialog(HDC dc, UiDlgState* st, const RECT& rcClient) {
             UiDrawRoundRect(dc, w, UiPx(5), true, c.bgAlt, true,
                             focused ? c.accent : wellBorder);
         };
+        // 消息框里的只读文本框（画个底，真正的文字由 EDIT 自己绘制）
+        if (st->hasSelectable && !IsRectEmpty(&st->rSelectable)) {
+            RECT w = st->rSelectable;
+            InflateRect(&w, UiPx(1), UiPx(1));
+            UiDrawRoundRect(dc, w, UiPx(5), true, c.bgAlt, true, c.border);
+        }
+
         drawWell(st->rEdit1, st->edit1 != nullptr, st->edit1);
         drawWell(st->rEdit2, st->edit2 != nullptr && IsWindowVisible(st->edit2), st->edit2);
+
+        // 密码框右侧的「随机生成」小按钮
+        if (st->showGenButton && !IsRectEmpty(&st->rGenBtn)) {
+            UiDrawRoundRect(dc, st->rGenBtn, UiPx(4), true, c.bgAlt, true, c.border);
+            UiDrawTextLine(dc, tr(L"随机生成", L"Generate"), st->rGenBtn,
+                           UiFont(UiPx(12), false), c.accent,
+                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
 
         RECT l1 = st->rLabel1;
         UiDrawTextLine(dc, tr(L"密码:", L"Password:"), l1, fBody, c.textMuted,
@@ -1400,6 +1567,37 @@ LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
+// 定义在文件后面（主题相关的编辑框样式）
+void ApplyEditTheme(HWND edit, const UiDlgState* st, bool mask = true);
+
+// 随机生成一个密码，同时填入「密码」和「确认」两个框，并切换成明文，
+// 方便用户核对并复制保存（密文点号状态没法复制）。
+static void DoGeneratePassword(HWND hwnd, UiDlgState* st) {
+    if (!st) return;
+    fe::PasswordRules rules;
+    rules.length  = Settings().pwGenLength;
+    rules.upper   = Settings().pwGenUpper;
+    rules.lower   = Settings().pwGenLower;
+    rules.digits  = Settings().pwGenDigits;
+    rules.symbols = Settings().pwGenSymbols;
+
+    const std::string pw = fe::GeneratePassword(rules);
+    const std::wstring wpw(pw.begin(), pw.end());
+
+    st->showPwd = true;                      // 明文：否则用户看不到、也复制不了
+    if (st->edit1) { SetWindowTextW(st->edit1, wpw.c_str()); ApplyEditTheme(st->edit1, st); }
+    if (st->edit2) { SetWindowTextW(st->edit2, wpw.c_str()); ApplyEditTheme(st->edit2, st); }
+    if (st->chkShow) {
+        SendMessageW(st->chkShow, BM_SETCHECK, BST_CHECKED, 0);
+        InvalidateRect(st->chkShow, NULL, FALSE);
+    }
+    // 全选：按 Ctrl+C 就能直接复制
+    if (st->edit1) { SetFocus(st->edit1); SendMessageW(st->edit1, EM_SETSEL, 0, -1); }
+
+    st->passwordGenerated = true;
+    if (hwnd) InvalidateRect(hwnd, NULL, FALSE);
+}
+
 void AttachHover(HWND h) {
     BtnExtra* ex = new BtnExtra();
     SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ex));
@@ -1441,7 +1639,7 @@ void ApplyEditRoundRegion(HWND edit) {
 
 // mask=true 时套用密码掩码。保护区的数字输入框必须传 false，
 // 否则会被当成密码框显示成一串星号。
-void ApplyEditTheme(HWND edit, const UiDlgState* st, bool mask = true) {
+void ApplyEditTheme(HWND edit, const UiDlgState* st, bool mask) {
     if (!edit) return;
     UiDetheme(edit);
     ApplyEditRoundRegion(edit);
@@ -1711,6 +1909,11 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             };
             st->edit1 = makeEdit(IDC_UI_EDIT1, st->rEdit1Inner, true);
             st->edit2 = makeEdit(IDC_UI_EDIT2, st->rEdit2Inner, st->confirm);
+            // 回填（从确认框点「返回」回来时带着刚才那个密码）
+            if (!st->password.empty()) {
+                if (st->edit1) SetWindowTextW(st->edit1, st->password.c_str());
+                if (st->edit2) SetWindowTextW(st->edit2, st->password.c_str());
+            }
 
             st->chkShow = CreateWindowExW(0, L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -1773,6 +1976,37 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ShowWindow(st->editDays, st->prot.action == 1 ? SW_SHOW : SW_HIDE);
                 }
                 SyncProtectionEnabled(st);
+            }
+        }
+
+        // 消息框：可选中复制的只读文本框
+        if (st->hasSelectable && !IsRectEmpty(&st->rSelectable)) {
+            const RECT& sr = st->rSelectable;
+            st->editSelectable = CreateWindowExW(0, L"EDIT", st->selectableText.c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL,
+                sr.left + UiPx(8), sr.top + UiPx(6),
+                sr.right - sr.left - UiPx(16), sr.bottom - sr.top - UiPx(12),
+                hwnd, (HMENU)(INT_PTR)IDC_SELECTABLE, inst, NULL);
+            if (st->editSelectable) {
+                SendMessageW(st->editSelectable, WM_SETFONT, (WPARAM)UiFont(UiPx(14), false), TRUE);
+                ApplyEditTheme(st->editSelectable, st, false);
+                // 打开就全选：用户直接 Ctrl+C 就能复制
+                SendMessageW(st->editSelectable, EM_SETSEL, 0, -1);
+            }
+        }
+
+        // 设置面板：随机密码位数输入框（4-128）
+        if (st->isSettings && !IsRectEmpty(&st->rGenLenEdit)) {
+            const RECT& er = st->rGenLenEdit;
+            st->editGenLen = CreateWindowExW(0, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL,
+                er.left, er.top, er.right - er.left, er.bottom - er.top,
+                hwnd, (HMENU)(INT_PTR)IDC_UI_GENLEN, inst, NULL);
+            if (st->editGenLen) {
+                SendMessageW(st->editGenLen, WM_SETFONT, (WPARAM)UiFont(UiPx(14), false), TRUE);
+                SendMessageW(st->editGenLen, EM_SETLIMITTEXT, 3, 0);
+                ApplyEditTheme(st->editGenLen, st, false);   // 数字框不用密码掩码
+                SetWindowTextW(st->editGenLen, std::to_wstring(st->genLen).c_str());
             }
         }
 
@@ -1871,6 +2105,12 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_NCHITTEST: {
+        if (st && st->showGenButton && !IsRectEmpty(&st->rGenBtn)) {
+            POINT hp = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            POINT cp = hp;
+            ScreenToClient(hwnd, &cp);
+            if (PtInRect(&st->rGenBtn, cp)) return HTCLIENT;
+        }
         const LRESULT hit = DefWindowProcW(hwnd, msg, wParam, lParam);
         if (hit != HTCLIENT || !st) return hit;
         POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
@@ -1907,6 +2147,11 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return HTCLIENT;
             if (!IsRectEmpty(&st->rSponsor) && PtInRect(&st->rSponsor, pt))
                 return HTCLIENT;
+            for (int i = 0; i < 4; ++i) {
+                if (!IsRectEmpty(&st->rGenBox[i]) &&
+                    (PtInRect(&st->rGenBox[i], pt) || PtInRect(&st->rGenLabel[i], pt)))
+                    return HTCLIENT;
+            }
         }
         return HTCAPTION; // 其余区域允许拖动整个卡片
     }
@@ -1914,6 +2159,12 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN: {
         if (!st || st->closing) break;   // 关闭淡出期间不再响应输入
         const POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
+
+        // 密码框右侧的「随机生成」（自绘按钮，走这里而不是 WM_COMMAND）
+        if (st->showGenButton && !IsRectEmpty(&st->rGenBtn) && PtInRect(&st->rGenBtn, pt)) {
+            DoGeneratePassword(hwnd, st);
+            return 0;
+        }
 
         if (st->isSettings) {
             for (size_t i = 0; i < st->rows.size(); ++i) {
@@ -1932,6 +2183,19 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     return 0;
                 }
             }
+            // 随机密码生成器：4 个类别复选框
+            for (int i = 0; i < 4; ++i) {
+                if (IsRectEmpty(&st->rGenBox[i])) continue;
+                if (!PtInRect(&st->rGenBox[i], pt) && !PtInRect(&st->rGenLabel[i], pt)) continue;
+                if (i == 0)      st->genUpper   = !st->genUpper;
+                else if (i == 1) st->genLower   = !st->genLower;
+                else if (i == 2) st->genDigits  = !st->genDigits;
+                else             st->genSymbols = !st->genSymbols;
+                UpdateGenHint(st);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+
             // 「禁用诱饵文件」复选框：点方块或文字都能切换（点问号图标不切换）
             if (!IsRectEmpty(&st->rDecoyBox) &&
                 (PtInRect(&st->rDecoyBox, pt) || PtInRect(&st->rDecoyLabel, pt))) {
@@ -2032,6 +2296,34 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                              st->useDecoy ? BST_CHECKED : BST_UNCHECKED, 0);
                 InvalidateRect(st->chkDecoy, NULL, FALSE);
             }
+            return 0;
+        }
+
+        if (id == IDC_GEN_PWD) {
+            DoGeneratePassword(hwnd, st);
+            return 0;
+        }
+
+        // 只读文本框获得焦点时全选，方便直接 Ctrl+C
+        if (id == IDC_SELECTABLE && HIWORD(wParam) == EN_SETFOCUS && st->editSelectable) {
+            SendMessageW(st->editSelectable, EM_SETSEL, 0, -1);
+            return 0;
+        }
+
+        // 位数输入：边输边校验，只接受 4-128；超范围立刻变红字提示
+        if (id == IDC_UI_GENLEN && HIWORD(wParam) == EN_CHANGE && st->editGenLen) {
+            wchar_t buf[8] = {};
+            GetWindowTextW(st->editGenLen, buf, _countof(buf));
+            const int v = _wtoi(buf);
+            if (buf[0] == L'\0') {
+                st->genLenError = false;      // 空着不报错，只是不更新
+            }
+            else {
+                st->genLenError = (v < 4 || v > 128);
+                if (!st->genLenError) st->genLen = v;
+            }
+            UpdateGenHint(st);
+            InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
 
@@ -2138,6 +2430,72 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             TickDialogAnimation(hwnd, st);
             return 0;
         }
+        if (wParam == DLG_SHAKE_TIMER && st) {
+            // 左右小幅晃动：8 步，幅度递减，最后回到原位
+            static const int kOffset[] = { 12, -12, 10, -10, 7, -7, 4, -4 };
+            if (st->shakeLeft <= 0) {
+                KillTimer(hwnd, DLG_SHAKE_TIMER);
+                SetWindowPos(hwnd, NULL, st->shakeBase.x, st->shakeBase.y, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                st->shakeLeft = -1;
+                return 0;
+            }
+            const int idx = 8 - st->shakeLeft;
+            if (idx >= 0 && idx < 8) {
+                SetWindowPos(hwnd, NULL, st->shakeBase.x + kOffset[idx], st->shakeBase.y, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            --st->shakeLeft;
+            return 0;
+        }
+
+        if (wParam == DLG_ATTENTION_TIMER && st) {
+            const ULONGLONG now = GetTickCount64();
+            if (st->isPassword || st->isSettings) return 0;
+
+            // 强调方式：把弹窗自己置顶并左右晃几下。
+            // 比 FlashWindowEx 靠谱得多 —— 本弹窗无标题栏、无任务栏按钮，
+            // 闪它本身是空操作；闪主窗口又容易让人莫名其妙。
+            auto StartShake = [&]() {
+                RECT rc = {};
+                if (!GetWindowRect(hwnd, &rc)) return;
+                st->shakeBase.x = rc.left;
+                st->shakeBase.y = rc.top;
+                st->shakeLeft = 8;                 // 8 步 × 30ms ≈ 240ms
+                // 置顶，保证一定看得见
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SetTimer(hwnd, DLG_SHAKE_TIMER, 30, NULL);
+            };
+
+            // 为什么不用 GetForegroundWindow 判断"用户是否想回到主窗口"：
+            // 弹窗打开时主窗口被 EnableWindow(owner, FALSE) 禁用了，点它不会
+            // 改变前台窗口，所以"前台 != 弹窗"永远不成立 —— 这就是最早完全不闪
+            // 也不响的原因。改成直接嗅探鼠标左键：按下且落点不在弹窗上，就认为
+            // 用户想绕过弹窗继续操作。
+            static bool      s_lastDown = false;
+            static ULONGLONG s_lastNag  = 0;
+            const bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            if (down && !s_lastDown && now - s_lastNag > 1200) {
+                POINT pt = {};
+                GetCursorPos(&pt);
+                HWND under = WindowFromPoint(pt);
+                const bool onDialog = (under == hwnd) || (under && IsChild(hwnd, under));
+                if (!onDialog && under) {
+                    DWORD pid = 0;
+                    GetWindowThreadProcessId(under, &pid);
+                    if (pid == GetCurrentProcessId()) {
+                        s_lastNag = now;
+                        MessageBeep(MB_ICONWARNING);
+                        StartShake();
+                    }
+                }
+            }
+            s_lastDown = down;
+
+
+            return 0;
+        }
         break;
 
     case WM_CLOSE:
@@ -2157,6 +2515,8 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_DESTROY:
+        KillTimer(hwnd, DLG_ATTENTION_TIMER);
+        KillTimer(hwnd, DLG_SHAKE_TIMER);
         if (st) {
             st->done = true;
             KillTimer(hwnd, DLG_ANIM_TIMER);
@@ -2255,6 +2615,11 @@ int RunDialog(HWND owner, UiDlgState* st) {
     }
 
     ShowWindow(hwnd, SW_SHOW);
+    // 消息框：每 600ms 检查一次是否被无视（切换到这个定时器在 WM_DESTROY 里清掉）
+    if (!st->isPassword && !st->isSettings) {
+        // 80ms 扫一次鼠标左键：太快没必要，太慢会漏掉快速点击
+        SetTimer(hwnd, DLG_ATTENTION_TIMER, 80, NULL);
+    }
     if (st->topmost) {
         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     }
@@ -2360,6 +2725,8 @@ int UiShowMessage(HWND owner, const UiMessage& m) {
     st.topmost = m.topmost;
     st.sound = m.sound;
     st.btnLabels = m.labels;
+    st.selectableText = m.selectable;
+    st.hasSelectable  = !m.selectable.empty();
 
     switch (m.buttons & 0x0F) {
     case MB_YESNO:
@@ -2395,9 +2762,24 @@ int UiShowMessage(HWND owner, const UiMessage& m) {
 bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
                     const std::wstring& subtitle, bool showProtection,
                     UiProtection* ioProt, int remainTries, bool showDecoy,
-                    bool* ioUseDecoy) {
+                    bool* ioUseDecoy, bool showGenButton, bool* ioGenerated,
+                    const std::string& initialPassword, bool initialGenerated) {
     UiDlgState st;
     st.isPassword = true;
+    st.showGenButton = showGenButton;
+    st.passwordGenerated = initialGenerated;
+    // 从「请保存密码」点返回时会带上刚才那个密码，免得用户再也没法复制
+    if (!initialPassword.empty()) {
+        const int n = MultiByteToWideChar(CP_UTF8, 0, initialPassword.c_str(),
+                                          (int)initialPassword.size(), NULL, 0);
+        if (n > 0) {
+            st.password.resize((size_t)n);
+            MultiByteToWideChar(CP_UTF8, 0, initialPassword.c_str(),
+                                (int)initialPassword.size(), &st.password[0], n);
+            // 回填的是刚生成的随机密码：直接明文显示，方便用户再复制一次
+            st.showPwd = true;
+        }
+    }
     st.confirm = confirm;
     st.subtitle = subtitle;
     st.sound = false;   // 密码框不需要提示音
@@ -2420,6 +2802,7 @@ bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
         outPassword = WstringToUtf8(st.password);
         if (st.showProtection && ioProt) *ioProt = st.prot;
         if (st.showDecoyOption && ioUseDecoy) *ioUseDecoy = st.useDecoy;
+        if (ioGenerated) *ioGenerated = st.passwordGenerated;
         return true;
     }
     return false;
@@ -2434,6 +2817,13 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
     st.decoyDisabled = io.decoyDisabled;
     st.keepSource = io.keepSource;
     st.shellMenu = io.shellMenu;
+    // 随机密码生成器
+    st.genLen     = io.pwGenLength;
+    st.genUpper   = io.pwGenUpper   != 0;
+    st.genLower   = io.pwGenLower   != 0;
+    st.genDigits  = io.pwGenDigits  != 0;
+    st.genSymbols = io.pwGenSymbols != 0;
+    UpdateGenHint(&st);
     st.btnIds = { IDOK, IDCANCEL };
     st.primaryId = IDOK;
     st.cancelId = IDCANCEL;
@@ -2483,5 +2873,10 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
     io.decoyDisabled = st.decoyDisabled;
     io.keepSource = st.keepSource;
     io.shellMenu = st.shellMenu;
+    io.pwGenLength  = st.genLen;
+    io.pwGenUpper   = st.genUpper   ? 1 : 0;
+    io.pwGenLower   = st.genLower   ? 1 : 0;
+    io.pwGenDigits  = st.genDigits  ? 1 : 0;
+    io.pwGenSymbols = st.genSymbols ? 1 : 0;
     return true;
 }

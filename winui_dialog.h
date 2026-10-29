@@ -23,6 +23,9 @@ struct UiMessage {
     std::vector<std::wstring> labels;
     // 可选：指定哪个按钮画成蓝色主按钮；0 = 用默认规则
     int          primaryId = 0;
+    // 可选：一段单独用只读编辑框显示的文字（可选中、可 Ctrl+C 复制）。
+    // 随机生成的密码必须让用户能复制走，画成普通文字是选不中的。
+    std::wstring selectable;
 };
 
 // 返回值：IDOK / IDYES / IDNO / IDCANCEL
@@ -49,13 +52,19 @@ struct UiProtection {
 // confirm==false（解密）时：
 //   remainTries >= 0 会在密码输入框下方用红字显示“还能尝试 X 次”（受保护文件专用）；
 //   传 -1 表示不显示（未启用保护的文件）。
+// showGenButton 为真时在密码框右侧显示「随机生成」按钮（仅加密时有意义）。
+// ioGenerated 返回本次密码是否由随机生成器填入 —— 调用方据此额外提醒用户保存。
 bool UiShowPassword(HWND owner, bool confirm, std::string& outPassword,
                     const std::wstring& subtitle = std::wstring(),
                     bool showProtection = false,
                     UiProtection* ioProt = nullptr,
                     int remainTries = -1,
                     bool showDecoy = false,
-                    bool* ioUseDecoy = nullptr);
+                    bool* ioUseDecoy = nullptr,
+                    bool showGenButton = false,
+                    bool* ioGenerated = nullptr,
+                    const std::string& initialPassword = std::string(),
+                    bool initialGenerated = false);
 
 // 设置对话框的数据（取值与 app_settings 中的枚举一一对应）
 struct UiSettingsData {
@@ -69,6 +78,9 @@ struct UiSettingsData {
     int          decoyDisabled = 0;  // 1=不写第二个槽，体积约 1 倍（放弃不可区分性）
     int          keepSource = 0;     // 1=加密后保留源文件，不做安全删除
     int          shellMenu = 1;      // 1=在资源管理器右键菜单中显示
+    // 随机密码生成器
+    int          pwGenLength = 20;   // 4-128
+    int          pwGenUpper = 1, pwGenLower = 1, pwGenDigits = 1, pwGenSymbols = 1;
 };
 
 // 打开设置对话框；用户点“确定”返回 true 并回填 io
