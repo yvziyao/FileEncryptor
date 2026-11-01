@@ -430,6 +430,21 @@
             <span class="badge"><i class="fas fa-shield-alt"></i> 开源 · 安全 · 便携</span>
             <h1>FileEncryptor</h1>
 
+            <!-- 先选形态：便携版 / 安装版 -->
+            <div class="edition-row">
+                <div class="edition-switch" id="editionSwitch">
+                    <button type="button" class="edition-btn active" data-edition="portable"
+                            onclick="switchEdition('portable')">便携版</button>
+                    <button type="button" class="edition-btn" data-edition="standard"
+                            onclick="switchEdition('standard')">安装版</button>
+                </div>
+                <p class="edition-desc">
+                    <span id="edPortable">单文件绿色版，放在任何位置都能直接运行，不写入安装信息。</span>
+                    <span id="edStandard" style="display:none;">安装到本机（需要管理员权限），自带开始菜单 / 桌面快捷方式、PATH 选项与卸载程序；安装时可自定义位置，并可只装图形界面、只装命令行或两者都装。</span>
+                </p>
+            </div>
+
+            <!-- 只有便携版才需要挑「图形界面 / 命令行」 -->
             <div class="version-tabs" id="download">
                 <button class="version-tab active" data-version="gui" onclick="switchVersion('gui')">
                     <i class="fas fa-desktop"></i> 图形界面
@@ -453,27 +468,44 @@
             </div>
 
             <div id="download-gui" class="download-buttons active">
-                <!-- 便携版 / 安装版 切换 -->
-                <div class="edition-switch" id="editionSwitch">
-                    <button type="button" class="edition-btn active" data-edition="portable"
-                            onclick="switchEdition('portable')">便携版</button>
-                    <button type="button" class="edition-btn" data-edition="standard"
-                            onclick="switchEdition('standard')">安装版</button>
-                </div>
                 <div class="download-row">
                     <a id="dlPrimary"
                        href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe"
                        class="btn btn-primary btn-primary-lg">
-                        <i class="fas fa-download"></i>
-                        <span id="dlLabelPortable">一键下载（便携版）</span><span id="dlLabelStandard" style="display:none;">下载安装程序</span>
+                        <i class="fas fa-download"></i> 一键下载（便携版）
                     </a>
                 </div>
-                <p class="edition-desc">
-                    <span id="edPortable">单文件绿色版，放在任何位置都能直接运行，不写入安装信息。</span>
-                    <span id="edStandard" style="display:none;">安装到本机，自带开始菜单 / 桌面快捷方式与卸载程序（按用户安装，不需要管理员权限）。</span>
-                </p>
                 <div class="download-row">
                     <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-outline">
+                        <i class="fab fa-github"></i> GitHub 下载
+                    </a>
+                    <a href="https://pan.baidu.com/s/1Ol5vDGNaF1uwYtZrls8ODQ?pwd=xx8u" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
+                        <i class="fas fa-cloud"></i> 百度网盘下载 (提取码:xx8u)
+                    </a>
+                </div>
+                <div class="download-row" style="gap: 24px; margin-top: 4px;">
+                    <a href="https://github.com/yvziyao/FileEncryptor/releases" target="_blank" rel="noopener noreferrer" class="release-link">
+                        GitHub Releases
+                    </a>
+                    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="release-link">
+                        Gitee Releases
+                    </a>
+                </div>
+            </div>
+
+            <!-- 安装版：只有选「安装版」时出现 -->
+            <div id="download-standard" class="download-buttons">
+                <div class="download-row">
+                    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptorSetup.exe"
+                       class="btn btn-primary btn-primary-lg">
+                        <i class="fas fa-download"></i> 下载安装程序
+                    </a>
+                </div>
+                <p class="edition-desc" style="margin-bottom: 14px;">
+                    安装时可选装图形界面、命令行（或两者），可选桌面快捷方式与加入 PATH。
+                </p>
+                <div class="download-row">
+                    <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptorSetup.exe" class="btn btn-outline">
                         <i class="fab fa-github"></i> GitHub 下载
                     </a>
                     <a href="https://pan.baidu.com/s/1Ol5vDGNaF1uwYtZrls8ODQ?pwd=xx8u" target="_blank" rel="noopener noreferrer" class="btn btn-outline">
@@ -720,14 +752,36 @@
         </div>
     `;
 
+    // 当前选择：形态（便携版 / 安装版）+ 版本（只有便携版才分图形界面 / 命令行）
+    var curEdition = 'portable';
+    var curVersion = 'gui';
+
+    // 按 curEdition + curVersion 决定显示哪些区块。
+    // 安装版是一次装好"图形界面 + 命令行"（装的时候再挑组件），所以这里不用选版本。
+    function applyDownloadVisibility() {
+        var portable = (curEdition === 'portable');
+        var setDisp = function (id, on) {
+            var e = document.getElementById(id);
+            if (e) e.style.display = on ? '' : 'none';
+        };
+        var setActive = function (id, on) {           // .download-buttons 靠 .active 显示
+            var e = document.getElementById(id);
+            if (e) e.classList.toggle('active', on);
+        };
+        setDisp('download', portable);                              // 图形界面 / 命令行 标签
+        setDisp('desc-gui', portable && curVersion === 'gui');
+        setDisp('desc-cli', portable && curVersion === 'cli');
+        setActive('download-gui', portable && curVersion === 'gui');
+        setActive('download-cli', portable && curVersion === 'cli');
+        setActive('download-standard', !portable);                  // 安装版专属下载区
+    }
+
     function switchVersion(version) {
+        curVersion = version;
         document.querySelectorAll('.version-tab').forEach(tab => {
             tab.classList.toggle('active', tab.dataset.version === version);
         });
-        document.getElementById('desc-gui').style.display = version === 'gui' ? 'block' : 'none';
-        document.getElementById('desc-cli').style.display = version === 'cli' ? 'block' : 'none';
-        document.getElementById('download-gui').classList.toggle('active', version === 'gui');
-        document.getElementById('download-cli').classList.toggle('active', version === 'cli');
+        applyDownloadVisibility();
         document.getElementById('featuresGrid').innerHTML = version === 'gui' ? guiCards : cliCards;
         document.getElementById('screenshots').classList.toggle('hidden', version === 'cli');
         const detail = document.getElementById('version-detail');
@@ -745,21 +799,17 @@
     };
     function switchEdition(ed) {
         if (!EDITION_URLS[ed]) ed = "portable";
-        var a = document.getElementById("dlPrimary");
-        if (a) a.href = EDITION_URLS[ed];
+        curEdition = ed;
         var btns = document.querySelectorAll("#editionSwitch .edition-btn");
         for (var i = 0; i < btns.length; ++i) {
             btns[i].classList.toggle("active", btns[i].getAttribute("data-edition") === ed);
         }
         var std = (ed === "standard");
-        var lp = document.getElementById("dlLabelPortable");
-        var ls = document.getElementById("dlLabelStandard");
-        if (lp) lp.style.display = std ? "none" : "";
-        if (ls) ls.style.display = std ? "" : "none";
         var ep = document.getElementById("edPortable");
         var es = document.getElementById("edStandard");
         if (ep) ep.style.display = std ? "none" : "";
         if (es) es.style.display = std ? "" : "none";
+        applyDownloadVisibility();
         // 切换后重新走一遍翻译（新显示的文本节点可能是首次出现）
         if (window.__feApplyLang) window.__feApplyLang();
     }
@@ -803,9 +853,11 @@
 @media (prefers-color-scheme: dark){
     .os-warn{ background: #3A2A10; border-color: #6B4A12; color: #FFD591; }
 }
+/* 便携版 / 安装版 切换（放在最上面：先选形态，再选版本） */
+.edition-row{ text-align: center; margin-bottom: 20px; }
 /* 便携版 / 安装版 切换 */
 .edition-switch{
-    display: inline-flex; margin: 0 auto 16px auto; padding: 3px;
+    display: inline-flex; margin: 0 auto 12px auto; padding: 3px;
     border: 1px solid rgba(128,128,128,.35); border-radius: 999px;
     background: rgba(128,128,128,.10);
 }
@@ -917,10 +969,13 @@
         "安装版": "Installer",
         "一键下载（便携版）": "Download portable (recommended)",
         "下载安装程序": "Download the installer",
+        "一键下载（便携版）": "Download portable (recommended)",
+        "安装时可选装图形界面、命令行（或两者），可选桌面快捷方式与加入 PATH。":
+            "During setup you can choose the GUI, the CLI (or both), plus a desktop shortcut and adding to PATH.",
         "单文件绿色版，放在任何位置都能直接运行，不写入安装信息。":
             "A single green binary you can run from anywhere; it writes no installation data.",
-        "安装到本机，自带开始菜单 / 桌面快捷方式与卸载程序（按用户安装，不需要管理员权限）。":
-            "Installs on this PC with Start menu / desktop shortcuts and an uninstaller (per-user, no admin rights).",
+        "安装到本机（需要管理员权限），自带开始菜单 / 桌面快捷方式、PATH 选项与卸载程序；安装时可自定义位置，并可只装图形界面、只装命令行或两者都装。":
+            "Installs on this PC (administrator rights required); includes Start menu / desktop shortcuts, a PATH option and an uninstaller. You can change the install folder and install the GUI, the CLI, or both.",
         "本应用可能不兼容你的操作系统：它需要 Windows 8 / 8.1 / 10 / 11（x64）。":
             "This app may not work on your operating system: it requires Windows 8 / 8.1 / 10 / 11 (x64).",
         "单 EXE 文件，无需额外 DLL，也不需要安装任何额外运行库——密码学全部使用 Windows 自带的 CNG。": "A single EXE with no extra DLLs and nothing else to install — all cryptography uses the CNG built into Windows.",
