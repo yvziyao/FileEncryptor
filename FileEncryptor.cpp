@@ -17,6 +17,7 @@
 #include "resource.h"
 #include "app_settings.h"
 #include "winui_password.h"
+#include "update_check.h"   // 启动时清理更新残留
 #include "winui_dialog.h"
 #include "ui_theme.h"
 #include "FileEncryptor_helpers.h"
@@ -2200,6 +2201,16 @@ static PwdCollect CollectDecryptPassword(HWND owner, const std::wstring& file,
 //
 // 与加解密共用同一个任务队列，所以批量处理、进度条、后台托盘、
 // 「已完成 x / y」队列计数全部自动具备，不需要另写一套。
+// UTF-8 -> UTF-16（用于把异常里的英文原因显示到中文界面）
+static std::wstring Utf8ToWideStr(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), NULL, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
+    return w;
+}
+
 static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int passes,
                                 const std::vector<std::wstring>& dirsToRemove = {}) {
     const bool english   = g_langEnglish;
@@ -2235,14 +2246,14 @@ static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int pass
     std::vector<uint64_t> perFileBytes;
     perFileBytes.reserve(files.size());
     uint64_t total = 0;
+    const ULONGLONG taskStartTick = GetTickCount64();   // 用于实测吞吐（估算预计时长）
     for (const auto& f : files) {
         uint64_t sz = 0;
-        HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h != INVALID_HANDLE_VALUE) {
-            LARGE_INTEGER li = {};
-            if (GetFileSizeEx(h, &li) && li.QuadPart > 0) sz = (uint64_t)li.QuadPart;
-            CloseHandle(h);
+        // 用 GetFileAttributesEx 取大小：不需要读权限，
+        // 这样"不可读"的文件也能算出正确的工作量（否则总量算 0，进度会一直卡在 0%）
+        WIN32_FILE_ATTRIBUTE_DATA ad = {};
+        if (GetFileAttributesExW(f.c_str(), GetFileExInfoStandard, &ad)) {
+            sz = ((uint64_t)ad.nFileSizeHigh << 32) | ad.nFileSizeLow;
         }
         // 工作量 = 文件大小 × 覆写次数（与 fe::SecureDeleteFile 上报的字节口径一致）
         perFileBytes.push_back(sz * (uint64_t)usePasses);
@@ -2259,13 +2270,15 @@ static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int pass
         postFileName(f);
         postStatus(english ? L"Securely deleting..." : L"正在安全删除...");
         try {
+            // 本地包装已把 fe:: 上报的累计字节转成增量，所以这里用 ProgressAdd
             SecureDeleteFile(f, usePasses, [](uint64_t n) { ProgressAdd(n); });
             ++okCount;
         }
-        catch (const std::exception&) {
-            failedList += f + L"\n";
+        catch (const std::exception& e) {
+            // 把失败原因一并列出，否则用户只看到"失败"不知道为什么
+            failedList += f + L"\n    " + Utf8ToWideStr(std::string(e.what())) + L"\n";
         }
-        ProgressEndFile();                    // 缺了这句进度永远不跨文件累加
+        ProgressEndFile();   // 缺了这句进度永远不跨文件累加
     }
 
     // 收尾：对齐到 100% 并隐藏进度条（加解密路径也是这么做的）。
@@ -2281,6 +2294,24 @@ static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int pass
         for (const auto& d : dirs) {
             // RemoveDirectoryW 只能删空目录；非空说明里面有删不掉的东西，忽略即可
             RemoveDirectoryW(d.c_str());
+        }
+    }
+
+    // 用本批的实测吞吐更新设置里的估算值（指数平滑，避免单次抖动）。
+    // 这样"预计耗时"会随着使用越来越贴近真机表现。
+    {
+        const ULONGLONG elapsed = GetTickCount64() - taskStartTick;
+        const uint64_t written = total * (uint64_t)usePasses;
+        if (elapsed > 200 && written > 0) {
+            uint64_t measured = written / 1024ULL * 1000ULL / (uint64_t)elapsed;   // KB/s
+            if (measured < 1024) measured = 1024;
+            if (measured > 8ULL * 1024 * 1024) measured = 8ULL * 1024 * 1024;
+            const int oldV = (Settings().delKBps > 0) ? Settings().delKBps : 256000;
+            const int newV = (int)(((int64_t)oldV * 3 + (int64_t)measured) / 4);
+            if (Settings().delKBps != newV) {
+                Settings().delKBps = newV;
+                SettingsSave();
+            }
         }
     }
 
@@ -2337,6 +2368,50 @@ static void StartSecureDelete(std::vector<std::wstring> files, int passes,
     EnqueueAndRun(std::move(task));
 }
 
+// 把秒数写成「约 X」这种自然语言（中英各一套）
+static std::wstring FormatEta(uint64_t secs) {
+    if (secs < 1) secs = 1;
+    wchar_t buf[128] = {};
+    if (secs < 60) {
+        // tr() 只收 const wchar_t*，这里直接格式化
+        if (g_langEnglish) swprintf_s(buf, L"about %llu s", secs);
+        else               swprintf_s(buf, L"约 %llu 秒", secs);
+        return buf;
+    }
+    if (secs < 3600) {
+        const uint64_t m = secs / 60, s = secs % 60;
+        if (g_langEnglish) {
+            swprintf_s(buf, L"about %llu min %llu s", m, s);
+        }
+        else {
+            swprintf_s(buf, L"约 %llu 分 %llu 秒", m, s);
+        }
+        return buf;
+    }
+    const uint64_t h = secs / 3600, m = (secs % 3600) / 60;
+    if (g_langEnglish) swprintf_s(buf, L"about %llu h %llu min", h, m);
+    else               swprintf_s(buf, L"约 %llu 小时 %llu 分", h, m);
+    return buf;
+}
+
+// 安全删除的预计时长：总写入量 / 实测吞吐 + 每个文件的固定开销
+static uint64_t EstimateDeleteSeconds(const std::vector<std::wstring>& files, int passes) {
+    uint64_t totalBytes = 0;
+    for (const auto& f : files) {
+        WIN32_FILE_ATTRIBUTE_DATA ad = {};
+        if (GetFileAttributesExW(f.c_str(), GetFileExInfoStandard, &ad)) {
+            totalBytes += ((uint64_t)ad.nFileSizeHigh << 32) | ad.nFileSizeLow;
+        }
+    }
+    const uint64_t work = totalBytes * (uint64_t)(passes > 0 ? passes : 1);
+    const uint64_t kbps = (uint64_t)((Settings().delKBps > 0) ? Settings().delKBps : 256000);
+    uint64_t secs = work / (kbps * 1024ULL);
+    if (work > 0 && secs == 0) secs = 1;      // 有数据就别显示 0
+    // 每个文件每遍还有打开/刷盘/删除的固定开销，按 20ms 估
+    secs += (uint64_t)files.size() * (uint64_t)(passes > 0 ? passes : 1) * 20ULL / 1000ULL;
+    return secs;
+}
+
 // 安全删除前的二次确认。
 // 删除不可撤销，无论从按钮还是拖放进来都必须先过这一关。
 static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> paths) {
@@ -2362,6 +2437,17 @@ static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> paths) 
     // 显式删除至少覆写一遍（设置里的 0 表示"加密后不删源文件"，用在这里没有意义）
     const int configured = (int)Settings().secureDelete;
     const int passes = (configured > 0) ? configured : 1;
+
+    // 预计时长：用之前实测的吞吐估算，写进确认框让用户有心理准备
+    std::wstring etaNote;
+    {
+        const uint64_t secs = EstimateDeleteSeconds(files, passes);
+        if (secs > 0) {
+            etaNote = g_langEnglish
+                ? (L"\n\nEstimated time: " + FormatEta(secs) + L".")
+                : (L"\n\n预计耗时：" + FormatEta(secs) + L"。");
+        }
+    }
 
     // 文件夹信息：让用户清楚这一下会把整个目录都删掉
     std::wstring dirNote;
@@ -2400,6 +2486,7 @@ static void ConfirmAndSecureDelete(HWND owner, std::vector<std::wstring> paths) 
                L" 次后删除，此操作不可恢复。");
         text += dirNote;
     }
+    text += etaNote;
 
     UiMessage m;
     m.icon = UiIcon::Warning;
@@ -2470,7 +2557,7 @@ static void EnqueueAndRun(TaskRequest task) {
         const bool keepSource = cfg.keepSource;   // 独立的「保留源文件」开关
         const OutDirMode outMode = cfg.outDir;
         const std::wstring fixedDir = cfg.fixedOutDir;
-        const CompletionMode completion = cfg.completion;
+
         const bool english = g_langEnglish;
         const size_t fileCount = files.size();
 
@@ -2636,11 +2723,6 @@ static void EnqueueAndRun(TaskRequest task) {
             // 全部被跳过（用户逐个取消了保存对话框）
             postStatus(english ? L"Cancelled" : L"已取消");
         }
-        else if (completion == CompletionMode::CloseWindow) {
-            // 完成后关闭窗口
-            postStatus(english ? L"Done" : L"完成");
-            if (g_mainWnd) PostMessageW(g_mainWnd, WM_CLOSE, 0, 0);
-        }
         else {
             const bool encryptOp = files.empty() ||
                 !(files[0].size() >= 4 && files[0].substr(files[0].size() - 4) == L".enc");
@@ -2688,7 +2770,7 @@ static void ShowSettingsDialog(HWND owner) {
     d.outDir       = (int)s.outDir;
     d.fixedDir     = s.fixedOutDir;
     d.secureDelete = (int)s.secureDelete;
-    d.completion   = (int)s.completion;
+
     d.strength     = (int)s.strength;
     d.decoyDisabled = s.decoyDisabled ? 1 : 0;
     d.keepSource   = s.keepSource ? 1 : 0;
@@ -2708,7 +2790,7 @@ static void ShowSettingsDialog(HWND owner) {
     w.outDir       = (OutDirMode)d.outDir;
     w.fixedOutDir  = d.fixedDir;
     w.secureDelete = d.secureDelete;
-    w.completion   = (CompletionMode)d.completion;
+
     w.strength     = (StrengthMode)d.strength;
     w.decoyDisabled = (d.decoyDisabled != 0);
     w.keepSource = (d.keepSource != 0);
@@ -2724,7 +2806,7 @@ static void ShowSettingsDialog(HWND owner) {
     ApplyShellMenuSetting();
 
     // 立即生效：语言 + 主题
-    g_langEnglish = (w.language == LangMode::English);
+    g_langEnglish = LangIsEnglish(w.language);
     UpdateLanguageUI();
     ApplyMainWindowWidth();
     UiSetThemeOverride((int)w.theme);
@@ -2889,6 +2971,7 @@ static bool ForwardToExisting(const LaunchRequest& req) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
+    CleanupOldVersion();   // 上次自动更新留下的 <exe>.old 在这里删掉
     (void)hPrevInstance; (void)lpCmdLine; // 未使用的参数
 
     g_exe_dir = GetExeDirectoryW();
@@ -2906,7 +2989,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // 读取设置并应用语言 / 主题
     SettingsLoad();
-    g_langEnglish = (Settings().language == LangMode::English);
+    g_langEnglish = LangIsEnglish(Settings().language);
 
     // ---- 资源管理器右键菜单：命令行请求 + 单实例转发 ----
     const LaunchRequest launch = ParseLaunchArgs();

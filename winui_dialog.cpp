@@ -1,4 +1,4 @@
-// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
+﻿// winui_dialog.cpp - WinUI 3 风格自绘对话框实现。
 //
 // 结构：
 //   UiDlgState        一次模态会话的全部状态（栈上分配，窗口销毁后返回）
@@ -14,6 +14,10 @@
 #include "ui_theme.h"
 #include "app_settings.h"
 #include "file_crypto.h"   // 随机密码生成（与 CLI 共用）
+#include "update_check.h"  // 检查更新
+
+// 当前界面是否英文（定义在主程序里，供检查更新的错误信息跟随语言）
+extern bool g_langEnglish;
 #include "FileEncryptor_helpers.h"
 
 #include <windows.h>
@@ -127,15 +131,9 @@ COLORREF IconColor(UiIcon icon) {
 }
 
 void PlayDialogSound(UiIcon icon) {
-    // 只有警告 / 错误 / 询问才发声。
-    // 普通提示（Information，比如“加密成功”）一律静音 ——
-    // 正常工作消息不该打扰用户，这也是现代应用的普遍做法。
-    switch (icon) {
-    case UiIcon::Error:    MessageBeep(MB_ICONERROR); break;
-    case UiIcon::Warning:  MessageBeep(MB_ICONWARNING); break;
-    case UiIcon::Question: MessageBeep(MB_ICONQUESTION); break;
-    default:               break;   // Information：静音
-    }
+    // 只有**报错**才发声。警告 / 询问 / 普通提示一律静音 ——
+    // 提示音太频繁会让人烦，只在真正出错时提醒。
+    if (icon == UiIcon::Error) MessageBeep(MB_ICONERROR);
 }
 
 // 密码强度评估（与原实现一致：长度 + 字符集）
@@ -246,6 +244,8 @@ struct UiDlgState {
     bool              showGenButton = false;
     RECT              rGenBtn{};
     bool              passwordGenerated = false;   // 本次密码由生成器填入
+    // 设置面板左下角的「检查更新」小按钮
+    RECT              rUpdateBtn{};
     // 设置面板：随机密码生成器（4 个类别复选框 + 位数输入框 + 弱提示）
     bool              genUpper = true, genLower = true, genDigits = true, genSymbols = true;
     RECT              rGenBox[4]{}, rGenLabel[4]{};
@@ -622,6 +622,18 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         const int pillW = sw + UiPx(26);   // 左右各留 13px 内边距
         const int pillTop = y + (st->btnH - UiPx(28)) / 2;
         st->rSponsor = { st->pad, pillTop, st->pad + pillW, pillTop + UiPx(28) };
+    }
+
+    // 「检查更新」小按钮，放在赞助按钮右侧
+    {
+        int sw = 0, sh = 0;
+        MeasureText(dc, UiFont(UiPx(12), false),
+                    tr(L"⟳ 检查更新", L"⟳ Check for updates"),
+                    UiPx(420), true, &sw, &sh);
+        const int pillW = sw + UiPx(26);
+        const int pillTop = y + (st->btnH - UiPx(28)) / 2;
+        const int left = st->rSponsor.right + UiPx(10);
+        st->rUpdateBtn = { left, pillTop, left + pillW, pillTop + UiPx(28) };
     }
 
     st->btnArea = { st->pad, y, winW - st->pad, y + st->btnH };
@@ -1346,6 +1358,15 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
         }
     }
 
+    // 「检查更新」小胶囊
+    if (!IsRectEmpty(&st->rUpdateBtn)) {
+        UiDrawRoundRect(dc, st->rUpdateBtn, UiPx(6), true, c.bgAlt, true, c.border);
+        RECT ur = st->rUpdateBtn;
+        UiDrawTextLine(dc, tr(L"⟳ 检查更新", L"⟳ Check for updates"), ur,
+                       UiFont(UiPx(12), false), c.accent,
+                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
     // 左下角「双击赞助」：不做成独立控件，直接自绘一个低调的小胶囊
     if (!IsRectEmpty(&st->rSponsor)) {
         UiDrawRoundRect(dc, st->rSponsor, UiPx(6), true, c.bgAlt, true, c.border);
@@ -1569,6 +1590,91 @@ LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 // 定义在文件后面（主题相关的编辑框样式）
 void ApplyEditTheme(HWND edit, const UiDlgState* st, bool mask = true);
+
+// 64 位十六进制的 sha256 一行放不下，按 32 字符折成两行
+static std::wstring WrapHash(const std::wstring& h) {
+    if (h.size() <= 32) return h;
+    return h.substr(0, 32) + L"\n" + h.substr(32);
+}
+
+// 检查更新：同步请求 Gitee API（几秒内返回），结果显示在消息框里。
+static void DoCheckUpdate(HWND hwnd, UiDlgState* st) {
+    const HCURSOR oldCur = SetCursor(LoadCursorW(NULL, IDC_WAIT));
+    UpdateCheckSetEnglish(g_langEnglish);   // 错误信息跟随界面语言
+    UpdateCheckResult r = CheckForUpdate();
+    SetCursor(oldCur);
+    if (!hwnd) hwnd = st ? st->hwnd : nullptr;
+
+    // 换行用字符构造，避免源码里写转义
+    const std::wstring NL2(2, static_cast<wchar_t>(10));
+
+    if (!r.ok) {
+        UiMessage m;
+        m.icon = UiIcon::Warning;
+        m.caption = tr(L"检查更新失败", L"Update check failed");
+        m.text = tr(L"无法获取最新版本信息：", L"Could not get the latest version:") + NL2 + r.error;
+        m.buttons = MB_OK;
+        m.topmost = true;
+        UiShowMessage(hwnd, m);
+        return;
+    }
+
+    if (!r.hasUpdate) {
+        UiMessage m;
+        m.icon = UiIcon::Info;
+        m.caption = tr(L"已是最新版本", L"Up to date");
+        m.text = tr(L"当前已经是最新版本。", L"You already have the latest version.");
+        m.buttons = MB_OK;
+        m.topmost = true;
+        UiShowMessage(hwnd, m);
+        return;
+    }
+
+    // 有新版本：直接问要不要就地替换
+    UiMessage ask;
+    ask.icon = UiIcon::Question;
+    ask.caption = tr(L"发现新版本", L"New version available");
+    ask.text = tr(L"发布页上的文件与本机不同，是否立即下载并替换当前程序？",
+                  L"The published build differs from yours. Download and replace it now?");
+    ask.buttons = MB_YESNO;
+    ask.labels = { tr(L"立即更新", L"Update now"), tr(L"稍后", L"Later") };
+    ask.topmost = true;
+    if (UiShowMessage(hwnd, ask) != IDYES) {
+        if (!r.downloadedPath.empty()) DeleteFileW(r.downloadedPath.c_str());
+        return;
+    }
+
+    std::wstring err;
+    if (!ApplyUpdate(r.downloadedPath, err)) {
+        UiMessage m;
+        m.icon = UiIcon::Error;
+        m.caption = tr(L"更新失败", L"Update failed");
+        m.text = tr(L"替换程序文件失败：", L"Could not replace the executable:") + NL2 + err +
+                 NL2 + tr(L"如果你用的是安装版，请用安装程序重新安装。",
+                          L"If you are using the installed edition, please re-run the installer.");
+        m.buttons = MB_OK;
+        m.topmost = true;
+        UiShowMessage(hwnd, m);
+        return;
+    }
+
+    if (!r.downloadedPath.empty()) DeleteFileW(r.downloadedPath.c_str());
+
+    // 启动新版本，然后退出当前进程（此时磁盘上已经是新文件了）
+    wchar_t self[MAX_PATH] = {};
+    GetModuleFileNameW(NULL, self, _countof(self));
+    std::wstring cmdline = std::wstring(L"\"") + self + L"\"";
+    std::vector<wchar_t> buf(cmdline.begin(), cmdline.end());
+    buf.push_back(static_cast<wchar_t>(0));
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    if (CreateProcessW(self, buf.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    ExitProcess(0);
+}
 
 // 随机生成一个密码，同时填入「密码」和「确认」两个框，并切换成明文，
 // 方便用户核对并复制保存（密文点号状态没法复制）。
@@ -2147,6 +2253,8 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return HTCLIENT;
             if (!IsRectEmpty(&st->rSponsor) && PtInRect(&st->rSponsor, pt))
                 return HTCLIENT;
+            if (!IsRectEmpty(&st->rUpdateBtn) && PtInRect(&st->rUpdateBtn, pt))
+                return HTCLIENT;
             for (int i = 0; i < 4; ++i) {
                 if (!IsRectEmpty(&st->rGenBox[i]) &&
                     (PtInRect(&st->rGenBox[i], pt) || PtInRect(&st->rGenLabel[i], pt)))
@@ -2217,6 +2325,12 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
+            // 「检查更新」：单击即触发（同步请求，最长约 3 秒，期间显示等待光标）
+            if (!IsRectEmpty(&st->rUpdateBtn) && PtInRect(&st->rUpdateBtn, pt)) {
+                DoCheckUpdate(hwnd, st);
+                return 0;
+            }
+
             // 左下角「双击赞助」：两次点击间隔 <500ms 才算双击，
             // 免得用户想点确定却误触把浏览器打开。
             if (!IsRectEmpty(&st->rSponsor) && PtInRect(&st->rSponsor, pt)) {
@@ -2419,6 +2533,14 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 st->password = buf1;
             }
+
+            // 设置面板：随机密码位数超出 4-128 时不允许关闭
+            if (st->isSettings && id == IDOK && st->genLenError) {
+                MessageBeep(MB_ICONWARNING);
+                if (st->editGenLen) SetFocus(st->editGenLen);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
             BeginCloseDialog(hwnd, st, id);   // 先淡出，动画结束后再销毁
             return 0;
         }
@@ -2451,7 +2573,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         if (wParam == DLG_ATTENTION_TIMER && st) {
             const ULONGLONG now = GetTickCount64();
-            if (st->isPassword || st->isSettings) return 0;
+            // 所有弹窗都适用（密码框 / 设置面板也一样会晃）
 
             // 强调方式：把弹窗自己置顶并左右晃几下。
             // 比 FlashWindowEx 靠谱得多 —— 本弹窗无标题栏、无任务栏按钮，
@@ -2615,11 +2737,9 @@ int RunDialog(HWND owner, UiDlgState* st) {
     }
 
     ShowWindow(hwnd, SW_SHOW);
-    // 消息框：每 600ms 检查一次是否被无视（切换到这个定时器在 WM_DESTROY 里清掉）
-    if (!st->isPassword && !st->isSettings) {
-        // 80ms 扫一次鼠标左键：太快没必要，太慢会漏掉快速点击
-        SetTimer(hwnd, DLG_ATTENTION_TIMER, 80, NULL);
-    }
+    // 所有弹窗都启用「被无视就晃几下」的检测（定时器在 WM_DESTROY 里清掉）
+    // 80ms 扫一次鼠标左键：太快没必要，太慢会漏掉快速点击
+    SetTimer(hwnd, DLG_ATTENTION_TIMER, 80, NULL);
     if (st->topmost) {
         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     }
@@ -2839,9 +2959,10 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
         st.rows.push_back(std::move(row));
     };
 
-    // 语言：当前为中文/English；后续要加别的语言，往这里追加选项即可
+    // 语言：中文 / English / 跟随系统（数值与 LangMode 一一对应）
     addRow(0, tr(L"语言", L"Language"),
-           { tr(L"中文", L"中文"), L"English" }, st.data.language);
+           { tr(L"中文", L"中文"), L"English", tr(L"跟随系统", L"System") },
+           st.data.language);
     addRow(1, tr(L"主题", L"Theme"),
            { tr(L"跟随系统", L"System"), tr(L"浅色", L"Light"), tr(L"深色", L"Dark") },
            st.data.theme);
@@ -2853,10 +2974,7 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
     addRow(3, tr(L"安全删除覆写次数", L"Overwrite passes"),
            { tr(L"1 次", L"1 pass"), tr(L"2 次", L"2 passes"), tr(L"3 次", L"3 passes") },
            st.data.secureDelete >= 3 ? 2 : (st.data.secureDelete == 2 ? 1 : 0));
-    addRow(4, tr(L"完成后", L"When done"),
-           { tr(L"关闭窗口", L"Close window"), tr(L"弹窗提示", L"Show dialog") },
-           st.data.completion);
-    addRow(5, tr(L"加密强度", L"Encryption strength"),
+    addRow(4, tr(L"加密强度", L"Encryption strength"),
            { tr(L"快速", L"Fast"), tr(L"标准", L"Standard"),
              tr(L"安全", L"Secure"), tr(L"极强", L"Extreme") },
            st.data.strength);
@@ -2868,8 +2986,7 @@ bool UiShowSettings(HWND owner, UiSettingsData& io) {
     io.outDir       = st.rows[2].selected;
     io.fixedDir     = st.data.fixedDir;
     io.secureDelete = (st.rows.size() > 3) ? (st.rows[3].selected + 1) : 3;
-    io.completion   = st.rows[4].selected;
-    io.strength     = st.rows[5].selected;
+    io.strength     = (st.rows.size() > 4) ? st.rows[4].selected : 1;
     io.decoyDisabled = st.decoyDisabled;
     io.keepSource = st.keepSource;
     io.shellMenu = st.shellMenu;

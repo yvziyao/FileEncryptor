@@ -35,7 +35,9 @@ A streaming file encryption tool built on AES-256-GCM and PBKDF2-HMAC-SHA256. La
 | Privileges | `asInvoker` — no administrator rights needed |
 
 **Older systems**: the PE header minimum version is 6.00 (Vista) and the import table contains no
-Win8/Win10-only APIs, so the program **should** start on Windows 7 SP1. The following effects only
+Win8/Win10-only APIs, so it could in theory start on Windows 7 SP1 — but it cannot: the cryptography
+relies on the system CNG, and `BCryptDeriveKeyPBKDF2` **requires Windows 8**. On Windows 7 that
+function does not exist, so key derivation fails and the program does not work. The following effects
 work on newer systems:
 
 | Effect | Minimum |
@@ -46,7 +48,7 @@ work on newer systems:
 | Light/dark following the system | Windows 10 |
 
 On unsupported systems these calls are simply ignored (no error) and the UI falls back to square
-corners with the default title bar. **Only Windows 10 / 11 have been fully verified.**
+corners with the default title bar. **Verified on Windows 8.1 / 10 / 11.**
 
 > Note: the program does not embed the `Microsoft.Windows.Common-Controls 6.0` manifest, so standard
 > controls render in the classic style. Since all UI is hand-drawn (and calls
@@ -57,7 +59,7 @@ corners with the default title bar. **Only Windows 10 / 11 have been fully verif
 
 | Item | Notes |
 |---|---|
-| OS | Windows (x64) |
+| OS | Windows 8 or later (x64) |
 | Architecture | x64 (source is architecture-independent; 32-bit compiles as well) |
 | Runtime | Statically linked, one file, no external dependencies (cryptography uses system CNG) |
 | Non-ASCII paths | Handled: paths are kept as UTF-8 internally and converted to UTF-16 for file APIs, so non-ASCII names work under any locale |
@@ -129,11 +131,10 @@ For Windows 10/11, with a clean graphical interface.
 
 * **Three peer features**: Encrypt file / Decrypt file / **Secure delete**
 * **Settings panel** (gear button, top right)
-  * Language: 中文 / English
+  * Language: 中文 / English / **Follow system** (default)
   * Theme: System / Light / Dark
   * Output location: same folder / fixed folder / ask each time
   * **Secure delete overwrite passes: 1 / 2 / 3** (segmented control)
-  * When done: close window / show dialog
   * Encryption strength: Fast / Standard / Secure / Extreme
   * **Keep source files after encrypting/decrypting**
   * **Disable decoy**: writes a single slot, ~1x the size instead of 2x — the trade-off is that the size reveals "no decoy"
@@ -214,11 +215,65 @@ reg delete "HKCU\Software\Classes\*\shell\FileEncryptor.SecureDelete" /f
 > **MSIX / sparse package** with **code signing**, which is a separate piece of work (it needs a
 > signing certificate) and is not done in this version.
 
-### Download and usage
+### Two editions
 
-1. Download `FileEncryptor.exe` from the [Releases](https://github.com/yvziyao/FileEncryptor/releases) page
-2. Run it, then click **Encrypt**, **Decrypt** or **Secure delete**
-3. Pick the target files and enter the password (you can also drag files straight into the window)
+The releases page ships the same program in two forms — **identical functionality**, different install style:
+
+| Edition | File | Notes |
+|---|---|---|
+| **Portable** | `FileEncryptor.exe` | A single green binary; run it from anywhere, no install data, no uninstall entry |
+| **Installer** | `FileEncryptorSetup.exe` | **Installs to `C:\Program Files\FileEncryptor`** by default (changeable) with Start-menu / desktop shortcuts for all users and an uninstall entry |
+
+The installer edition:
+
+* **Asks for administrator rights on launch**: it writes to `Program Files` and the `HKLM` registry
+* **Pick what to install**: "GUI" and "Command line" checkboxes (at least one)
+  * "GUI" → optionally "Create a desktop shortcut"
+  * "Command line" → optionally "Add to PATH" so `enc` works right away in a terminal
+* The install folder is **yours to choose** (edit the field or use "Browse...")
+* The installer UI has a **language switch** in the top-right corner and follows the system
+  language by default
+* Shortcuts are created for **all users** (common Start menu and public desktop)
+* The uninstall entry lives under `HKLM`, so any user can find and remove it from
+  Settings → Apps → Installed apps
+* `uninstall.exe` inside the install folder opens a **maintenance window**:
+  * **Upgrade / Repair**: reinstall into the same folder (path pre-filled) to upgrade or fix it
+  * **Uninstall**: removes files, shortcuts, the registry entry and the **PATH entry**; the
+    uninstaller itself and the empty folder are removed on the next restart
+  (Windows does not allow a running exe to delete itself)
+
+Build the installer yourself:
+
+```bat
+build_setup.cmd
+```
+
+It builds the GUI and CLI first, then embeds both exes as `RCDATA` via `setup.rc` and produces
+`x64\Release\FileEncryptorSetup.exe`.
+
+> ⚠️ The build script deliberately does **not** enable `/GL` (LTCG): on some machines that
+> optimisation makes the installer crash with `STATUS_ILLEGAL_INSTRUCTION (0xC000001D)`.
+> The GUI and CLI are fine with LTCG; only the installer hits this.
+
+### Checking for updates
+
+Settings has a "⟳ Check for updates" button in the bottom-left corner. It **downloads the published
+`FileEncryptor.exe`, hashes it, and compares the SHA-256 with your local exe**:
+
+* Different hash → asks "New version available. Update now?"
+  * "Update now": **replaces the running executable and restarts** (the old file is renamed to
+    `<exe>.old` and cleaned up on the next start)
+  * "Later": skip this update
+* Same hash → reports that you are up to date
+
+> **Why not compare version numbers**: releases here are **rolling** — every build overwrites the
+> same `v1.0.0` tag, so a version comparison would always report "up to date". Version numbers are
+> useless for this project.
+>
+> **Why it has to download**: the Gitee release API only exposes each asset's `name` and
+> `browser_download_url` — no size, no sha256, no timestamp. Hashing the downloaded file is the only
+> reliable signal. The exe is about 700 KB, acceptable for a manual click
+> (`update_check.cpp` caps the download at 64 MB).
 
 ---
 
@@ -304,6 +359,7 @@ enc file.txt.enc -p yourpassword -o D:\Decrypted -k
 | `--gen-len <n>` | Generated password length, 4-128, default 20 |
 | `--gen-sets <list>` | Character classes: `upper,lower,digits,symbols` (all by default) |
 | `--delete` / `-D <files...>` | **Secure delete**: only deletes, no encrypt/decrypt; multiple files allowed, pass count via `-w` |
+| `--check-update` / `-U` | **Check for updates**: downloads the published build and compares hashes; exit code `0`=up to date, `2`=update available, `1`=error |
 | `--lang <zh\|en>` | Output language, default `en`. Use `--lang zh` for Chinese |
 | `-h` / `--help` | Show help |
 

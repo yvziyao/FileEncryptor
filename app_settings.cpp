@@ -65,11 +65,12 @@ AppSettings& Settings() {
 
 void SettingsLoad() {
     AppSettings& s = Settings();
-    s.language     = ClampEnum<LangMode>(RegGetDword(L"Language", 0), 1, LangMode::Chinese);
+    // 默认「跟随系统」：按系统 UI 语言自动选中/英文
+    s.language     = ClampEnum<LangMode>(RegGetDword(L"Language", 2), 2, LangMode::System);
     s.theme        = ClampEnum<ThemeMode>(RegGetDword(L"Theme", 0), 2, ThemeMode::System);
     s.outDir       = ClampEnum<OutDirMode>(RegGetDword(L"OutDirMode", 0), 2, OutDirMode::SourceDir);
     s.fixedOutDir  = RegGetString(L"OutDir");
-    s.completion   = ClampEnum<CompletionMode>(RegGetDword(L"Completion", 1), 1, CompletionMode::ShowDialog);
+
 
     // 覆写次数夹到 1-3（设置面板里是 1/2/3 三档）
     DWORD sd = RegGetDword(L"SecureDelete", 3);
@@ -91,6 +92,11 @@ void SettingsLoad() {
     s.pwGenLower   = RegGetDword(L"PwGenLower",   1) != 0;
     s.pwGenDigits  = RegGetDword(L"PwGenDigits",  1) != 0;
     s.pwGenSymbols = RegGetDword(L"PwGenSymbols", 1) != 0;
+
+    DWORD kbps = RegGetDword(L"DelKBps", 256000);
+    if (kbps < 1024)        kbps = 1024;
+    if (kbps > 8u * 1024u * 1024u) kbps = 8u * 1024u * 1024u;
+    s.delKBps = (int)kbps;
 }
 
 void SettingsSave() {
@@ -100,7 +106,7 @@ void SettingsSave() {
     RegSetDword(L"OutDirMode", (DWORD)s.outDir);
     RegSetString(L"OutDir", s.fixedOutDir);
     RegSetDword(L"SecureDelete", (DWORD)s.secureDelete);
-    RegSetDword(L"Completion", (DWORD)s.completion);
+
     RegSetDword(L"Strength", (DWORD)s.strength);
     RegSetDword(L"DecoyDisabled", s.decoyDisabled ? 1 : 0);
     RegSetDword(L"PwGenLength",  (DWORD)s.pwGenLength);
@@ -108,8 +114,21 @@ void SettingsSave() {
     RegSetDword(L"PwGenLower",   s.pwGenLower   ? 1 : 0);
     RegSetDword(L"PwGenDigits",  s.pwGenDigits  ? 1 : 0);
     RegSetDword(L"PwGenSymbols", s.pwGenSymbols ? 1 : 0);
+    RegSetDword(L"DelKBps", (DWORD)s.delKBps);
     RegSetDword(L"KeepSource", s.keepSource ? 1 : 0);
     RegSetDword(L"ShellMenu", s.shellMenu ? 1 : 0);
+}
+
+bool LangIsEnglish(LangMode mode) {
+    switch (mode) {
+    case LangMode::Chinese: return false;
+    case LangMode::English: return true;
+    case LangMode::System:  break;
+    }
+    // 跟随系统：UI 语言的主语言 ID 是中文（0x04）才用中文，
+    // 其它语言（德语、日语……）用英文更通用。
+    const LANGID lid = GetUserDefaultUILanguage();
+    return (PRIMARYLANGID(lid) != LANG_CHINESE);
 }
 
 int StrengthIterations(StrengthMode s) {
@@ -166,10 +185,4 @@ std::wstring SecureDeleteName(int passes) {
     return std::wstring();
 }
 
-std::wstring CompletionName(CompletionMode c) {
-    switch (c) {
-    case CompletionMode::CloseWindow: return tr(L"关闭窗口", L"Close window");
-    case CompletionMode::ShowDialog:  return tr(L"弹窗提示", L"Show dialog");
-    }
-    return std::wstring();
-}
+

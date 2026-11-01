@@ -14,7 +14,8 @@
 #endif
 
 #include "file_format.h"   // 文件格式的唯一定义（与 GUI 共用）
-#include "file_crypto.h"   // 加解密核心的唯一实现（与 GUI 共用）
+#include "file_crypto.h"
+#include "update_check.h"   // 检查更新（与 GUI 共用实现）   // 加解密核心的唯一实现（与 GUI 共用）
 using namespace fe;
 using fe::PutU16; using fe::PutU32; using fe::PutU64;
 using fe::GetU16; using fe::GetU32; using fe::GetU64;
@@ -74,6 +75,17 @@ static std::string ArgToUtf8(const char* s) {
     return out;
 }
 
+// UTF-16 -> UTF-8（用于把 update_check 返回的宽字符错误信息打到控制台）
+static std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(),
+                                      NULL, 0, NULL, NULL);
+    if (n <= 0) return std::string();
+    std::string s((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, NULL, NULL);
+    return s;
+}
+
 // 把控制台输出代码页切到 UTF-8（源码字面量是 UTF-8），退出时还原，
 // 免得在默认中文 Windows（代码页 936）下中文显示成乱码。
 struct ConsoleUtf8Scope {
@@ -88,6 +100,7 @@ struct ConsoleUtf8Scope {
 };
 #else
 static std::string ArgToUtf8(const char* s) { return std::string(s ? s : ""); }
+
 #endif
 
 static fs::path PathOf(const std::string& utf8_path) {
@@ -282,6 +295,7 @@ void print_usage(const char* prog_name) {
     std::cout << T("  --gen, -g        生成一个随机密码并显示，回车后开始加密") << std::endl;
     std::cout << T("  --gen-len <n>    密码长度（4-128，默认 20）") << std::endl;
     std::cout << T("  --gen-sets <list> 包含的字符类别：upper,lower,digits,symbols（默认全含）") << std::endl;
+    std::cout << T("  --check-update, -U  检查发布页上是否有更新的构建（会下载比对）") << std::endl;
     std::cout << T("  --lang <zh|en> 输出语言（默认 en）") << std::endl;
     std::cout << T("  -h, --help    显示帮助") << std::endl;
     std::cout << T("示例:") << std::endl;
@@ -318,6 +332,7 @@ int main(int argc, char* argv[]) {
     bool single_slot = false;   // --no-decoy：只写一个槽，体积约 1 倍
     // 安全删除模式（--delete）的文件列表：支持一次删多个
     std::vector<std::string> delete_files;
+    bool checkUpdate = false;   // --check-update：检查是否有新版本
     // 随机生成密码（与 -p 互斥）
     bool gen_password = false;
     int  gen_len = 20;
@@ -433,6 +448,8 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--delete" || arg == "-D") {
             mode = "--delete";
+        } else if (arg == "--check-update" || arg == "-U") {
+            checkUpdate = true;
         } else if (!arg.empty() && arg[0] != '-') {
             // 位置参数：--delete 之后是要删除的文件（可多个），
             // 否则就是输入文件（不再需要 -i，直接写路径）
@@ -456,7 +473,9 @@ int main(int argc, char* argv[]) {
     }
     
     // 不指定 -e / -d 时按后缀自动判断：.enc 结尾 = 解密，否则 = 加密
-    if (mode.empty()) {
+    // --check-update 不需要输入文件，也不进入加密/解密模式
+
+    if (mode.empty() && !checkUpdate) {
         if (input_file.empty()) {
             print_usage(argv[0]);
             return 1;
@@ -465,8 +484,11 @@ int main(int argc, char* argv[]) {
                    ? "-d" : "-e";
 
     }
-    // --delete 可以用位置参数给文件，所以不强制 -i
-    if (mode == "--delete") {
+    // --delete 可以用位置参数给文件，所以不强制 -i；--check-update 根本不需要文件
+    if (checkUpdate) {
+        // 交给下面的检查更新分支处理
+    }
+    else if (mode == "--delete") {
         if (input_file.empty() && delete_files.empty()) {
             print_usage(argv[0]);
             return 1;
@@ -476,6 +498,24 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    // ---- 检查更新：比对发布页上的 exe 与本机的 sha256 ----
+    if (checkUpdate) {
+        std::cout << T("正在检查更新（会下载发布页上的程序用于比对）...") << std::endl;
+        UpdateCheckSetEnglish(!g_zh);
+        const UpdateCheckResult r = CheckForUpdate();
+        if (!r.ok) {
+            std::cerr << T("检查失败：") << WideToUtf8(r.error) << std::endl;
+            return 1;
+        }
+        if (!r.hasUpdate) {
+            std::cout << T("已是最新版本。") << std::endl;
+            return 0;
+        }
+        std::cout << T("发现新版本！") << std::endl;
+        std::cout << T("下载地址：") << "https://gitee.com/yvziyao/FileEncryptor/releases" << std::endl;
+        return 2;   // 2 = 有更新（便于脚本判断）
+    }
+
     // ---- 安全删除模式：只删文件，不加密也不解密 ----
     // 与 GUI 的「安全删除」是同一个实现（fe::SecureDeleteFile），
     // 所以覆写次数、失败处理的行为完全一致。

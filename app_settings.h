@@ -4,10 +4,12 @@
 #include <windows.h>
 #include <string>
 
-enum class LangMode { Chinese = 0, English = 1 };
+// 注意：Chinese/English 的数值不能改 —— 注册表里已存的 0/1 要保持原意。
+// System 追加在末尾。
+enum class LangMode { Chinese = 0, English = 1, System = 2 };
 enum class ThemeMode { System = 0, Light = 1, Dark = 2 };
 enum class OutDirMode { SourceDir = 0, FixedDir = 1, AskEveryTime = 2 };
-enum class CompletionMode { CloseWindow = 0, ShowDialog = 1 };
+
 enum class StrengthMode { Fast = 0, Standard = 1, Secure = 2, Extreme = 3 };
 
 struct AppSettings {
@@ -22,7 +24,7 @@ struct AppSettings {
     bool             keepSource = false;
     // 是否在资源管理器右键菜单中显示（关闭时会删除已注册的菜单项）
     bool             shellMenu = true;
-    CompletionMode   completion = CompletionMode::ShowDialog;
+
     StrengthMode     strength = StrengthMode::Standard;
     // 禁用诱饵文件：加密时只写一个槽，体积约 1 倍。
     // 代价是文件大小会暴露「没有诱饵」，不可否认性减弱。
@@ -36,7 +38,14 @@ struct AppSettings {
     bool             pwGenLower   = true;
     bool             pwGenDigits  = true;
     bool             pwGenSymbols = true;
+
+    // 安全删除的实测吞吐（KB/s）。用于确认框里估算预计时长；
+    // 每次真正删完一批文件后按实测值做指数平滑更新。
+    int              delKBps = 256000;   // 默认按 250 MB/s 估
 };
+
+// 语言是否用英文：System 按系统 UI 语言判断（非中文系统一律用英文）
+bool LangIsEnglish(LangMode mode);
 
 // 全局单例
 AppSettings& Settings();
@@ -54,4 +63,4 @@ std::wstring StrengthName(StrengthMode s);
 std::wstring ThemeName(ThemeMode t);
 std::wstring OutDirName(OutDirMode d);
 std::wstring SecureDeleteName(int passes);
-std::wstring CompletionName(CompletionMode c);
+

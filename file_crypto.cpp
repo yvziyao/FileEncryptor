@@ -728,44 +728,64 @@ int ConsumeAttempt(const std::wstring& path, const FileState& st, std::string& o
 // ---------------------------------------------------------------- 安全删除
 
 void SecureDeleteFile(const std::wstring& path, int passes, const ProgressFn& progress) {
-    if (passes <= 0) {
-        DeleteFileW(path.c_str());
-        return;
+    // 文件必须存在：不存在时直接报错，不能"静默成功"
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        throw std::runtime_error("file not found");
     }
-    try {
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+        throw std::runtime_error("path is a directory");
+    }
+    // 只读 / 隐藏 / 系统属性会让 CreateFile(GENERIC_WRITE) 和 DeleteFileW 直接
+    // ACCESS_DENIED。资源管理器删除时也是先清掉属性，这里照做。
+    if (attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) {
+        if (!SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL)) {
+            throw std::runtime_error("access denied (cannot clear file attributes)");
+        }
+    }
+
+    if (passes > 0) {
         HandleGuard h(CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL,
                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL));
-        if (h.h != INVALID_HANDLE_VALUE) {
-            const uint64_t fileSize = FileSizeOf(h.h);
-            if (fileSize > 0) {
-                std::vector<uint8_t> buf(64 * 1024);
-                uint64_t done = 0;
-                const uint64_t total = fileSize * (uint64_t)passes;
-                for (int pass = 0; pass < passes; ++pass) {
-                    SeekTo(h.h, 0);
-                    uint64_t remaining = fileSize;
-                    while (remaining > 0) {
-                        size_t n = (size_t)(remaining < (uint64_t)buf.size() ? remaining : (uint64_t)buf.size());
-                        RandBytes(buf.data(), n);
-                        // 交替写入随机数据与随机数据的反码，覆盖更彻底
-                        if (pass % 2 == 1) {
-                            for (size_t i = 0; i < n; ++i) buf[i] = (uint8_t)~buf[i];
-                        }
-                        DWORD bw = 0;
-                        if (!WriteFile(h.h, buf.data(), (DWORD)n, &bw, NULL) || bw == 0) break;
-                        remaining -= bw;
-                        done += bw;
-                        if (progress) progress(done, total);
+        // 关键：以前这里是 `if (h.h != INVALID_HANDLE_VALUE) {...}`，打开失败就
+        // 跳过覆写、最后照样 DeleteFileW 并"返回成功"，于是无写权限的文件会
+        // 被报告成已删除，实际还躺在磁盘上。现在必须抛出，让调用方计入失败。
+        if (h.h == INVALID_HANDLE_VALUE) {
+            throw std::runtime_error("access denied (cannot open for writing)");
+        }
+
+        const uint64_t fileSize = FileSizeOf(h.h);
+        if (fileSize > 0) {
+            std::vector<uint8_t> buf(64 * 1024);
+            uint64_t done = 0;
+            const uint64_t total = fileSize * (uint64_t)passes;
+            for (int pass = 0; pass < passes; ++pass) {
+                SeekTo(h.h, 0);
+                uint64_t remaining = fileSize;
+                while (remaining > 0) {
+                    size_t n = (size_t)(remaining < (uint64_t)buf.size() ? remaining : (uint64_t)buf.size());
+                    RandBytes(buf.data(), n);
+                    // 交替写入随机数据与随机数据的反码，覆盖更彻底
+                    if (pass % 2 == 1) {
+                        for (size_t i = 0; i < n; ++i) buf[i] = (uint8_t)~buf[i];
                     }
-                    FlushFileBuffers(h.h);
+                    DWORD bw = 0;
+                    if (!WriteFile(h.h, buf.data(), (DWORD)n, &bw, NULL) || bw == 0) {
+                        throw std::runtime_error("write failed (file may be in use)");
+                    }
+                    remaining -= bw;
+                    done += bw;
+                    if (progress) progress(done, total);
                 }
+                FlushFileBuffers(h.h);
             }
         }
     }
-    catch (...) {
-        // best-effort：无论如何都要尝试删除
+
+    // DeleteFileW 失败也必须报出来（例如文件正被其它程序占用）
+    if (!DeleteFileW(path.c_str())) {
+        throw std::runtime_error("could not delete (file may be in use)");
     }
-    DeleteFileW(path.c_str());
 }
 
 } // namespace fe

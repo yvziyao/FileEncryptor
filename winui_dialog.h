@@ -73,7 +73,7 @@ struct UiSettingsData {
     int          outDir = 0;         // 0=源文件同目录 1=指定目录 2=每次都询问
     std::wstring fixedDir;           // outDir==1 时生效
     int          secureDelete = 3;   // 0=禁用 1=覆写1次 3=覆写3次
-    int          completion = 1;     // 0=关闭窗口 1=弹窗提示
+
     int          strength = 1;       // 0=快速 1=标准 2=安全 3=极强
     int          decoyDisabled = 0;  // 1=不写第二个槽，体积约 1 倍（放弃不可区分性）
     int          keepSource = 0;     // 1=加密后保留源文件，不做安全删除

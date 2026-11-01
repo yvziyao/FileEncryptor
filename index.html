@@ -1,4 +1,4 @@
-
+﻿
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -439,6 +439,12 @@
                 </button>
             </div>
 
+            <!-- 操作系统兼容性提示：由脚本按 userAgent 判断，不满足则显示 -->
+            <div id="osWarn" class="os-warn">
+                <i class="fas fa-exclamation-triangle"></i>
+                <span>本应用可能不兼容你的操作系统：它需要 Windows 8 / 8.1 / 10 / 11（x64）。</span>
+            </div>
+
             <div id="desc-gui" class="version-desc">
                 <p>基于 AES-256-GCM 与 PBKDF2 的流式文件加密工具。<br>支持加密强度、输出位置、删除策略与错误密码次数限制，为 Windows 提供简洁、安全、高效的文件加解密体验。</p>
             </div>
@@ -447,11 +453,25 @@
             </div>
 
             <div id="download-gui" class="download-buttons active">
+                <!-- 便携版 / 安装版 切换 -->
+                <div class="edition-switch" id="editionSwitch">
+                    <button type="button" class="edition-btn active" data-edition="portable"
+                            onclick="switchEdition('portable')">便携版</button>
+                    <button type="button" class="edition-btn" data-edition="standard"
+                            onclick="switchEdition('standard')">安装版</button>
+                </div>
                 <div class="download-row">
-                    <a href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-primary btn-primary-lg">
-                        <i class="fas fa-download"></i> 一键下载（推荐）
+                    <a id="dlPrimary"
+                       href="https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe"
+                       class="btn btn-primary btn-primary-lg">
+                        <i class="fas fa-download"></i>
+                        <span id="dlLabelPortable">一键下载（便携版）</span><span id="dlLabelStandard" style="display:none;">下载安装程序</span>
                     </a>
                 </div>
+                <p class="edition-desc">
+                    <span id="edPortable">单文件绿色版，放在任何位置都能直接运行，不写入安装信息。</span>
+                    <span id="edStandard" style="display:none;">安装到本机，自带开始菜单 / 桌面快捷方式与卸载程序（按用户安装，不需要管理员权限）。</span>
+                </p>
                 <div class="download-row">
                     <a href="https://github.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe" class="btn btn-outline">
                         <i class="fab fa-github"></i> GitHub 下载
@@ -718,6 +738,32 @@
         }
     }
 
+    // 便携版 / 安装版 切换：只换主下载按钮的链接与文案
+    var EDITION_URLS = {
+        portable: "https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptor.exe",
+        standard: "https://gitee.com/yvziyao/FileEncryptor/releases/download/v1.0.0/FileEncryptorSetup.exe"
+    };
+    function switchEdition(ed) {
+        if (!EDITION_URLS[ed]) ed = "portable";
+        var a = document.getElementById("dlPrimary");
+        if (a) a.href = EDITION_URLS[ed];
+        var btns = document.querySelectorAll("#editionSwitch .edition-btn");
+        for (var i = 0; i < btns.length; ++i) {
+            btns[i].classList.toggle("active", btns[i].getAttribute("data-edition") === ed);
+        }
+        var std = (ed === "standard");
+        var lp = document.getElementById("dlLabelPortable");
+        var ls = document.getElementById("dlLabelStandard");
+        if (lp) lp.style.display = std ? "none" : "";
+        if (ls) ls.style.display = std ? "" : "none";
+        var ep = document.getElementById("edPortable");
+        var es = document.getElementById("edStandard");
+        if (ep) ep.style.display = std ? "none" : "";
+        if (es) es.style.display = std ? "" : "none";
+        // 切换后重新走一遍翻译（新显示的文本节点可能是首次出现）
+        if (window.__feApplyLang) window.__feApplyLang();
+    }
+
     function showQR(imageSrc, label) {
         document.getElementById('modalImage').src = imageSrc;
         document.getElementById('modalLabel').textContent = label;
@@ -746,6 +792,34 @@
     color:inherit; opacity:.65; transition:background .18s, opacity .18s;
 }
 .lang-toggle span.active{ background:#2563eb; color:#fff; opacity:1; }
+/* 操作系统兼容性提示（默认隐藏，脚本判断后显示） */
+.os-warn{
+    display: none;
+    max-width: 620px; margin: 0 auto 16px auto; padding: 11px 18px;
+    border-radius: 10px; background: #FFF7E6; border: 1px solid #FFD591;
+    color: #AD6800; font-size: .92rem; line-height: 1.55; text-align: left;
+}
+.os-warn i{ margin-right: 8px; }
+@media (prefers-color-scheme: dark){
+    .os-warn{ background: #3A2A10; border-color: #6B4A12; color: #FFD591; }
+}
+/* 便携版 / 安装版 切换 */
+.edition-switch{
+    display: inline-flex; margin: 0 auto 16px auto; padding: 3px;
+    border: 1px solid rgba(128,128,128,.35); border-radius: 999px;
+    background: rgba(128,128,128,.10);
+}
+.edition-btn{
+    padding: 7px 22px; border: 0; border-radius: 999px; cursor: pointer;
+    background: transparent; color: inherit; font: inherit; font-size: .92rem; opacity: .7;
+    transition: background .18s, opacity .18s;
+}
+.edition-btn.active{ background: #2563eb; color: #fff; opacity: 1; }
+.edition-desc{
+    margin: 10px auto 0 auto; max-width: 620px; font-size: .88rem;
+    color: #666; line-height: 1.6;
+}
+@media (prefers-color-scheme: dark){ .edition-desc{ color: #aaa; } }
 </style>
 
 <script>
@@ -839,6 +913,16 @@
                 "保留源文件，": "keeping the source file,",
         "可直接安全删除文件。": "and --delete securely deletes files directly.",
         "，支持": ", supporting",
+        "便携版": "Portable",
+        "安装版": "Installer",
+        "一键下载（便携版）": "Download portable (recommended)",
+        "下载安装程序": "Download the installer",
+        "单文件绿色版，放在任何位置都能直接运行，不写入安装信息。":
+            "A single green binary you can run from anywhere; it writes no installation data.",
+        "安装到本机，自带开始菜单 / 桌面快捷方式与卸载程序（按用户安装，不需要管理员权限）。":
+            "Installs on this PC with Start menu / desktop shortcuts and an uninstaller (per-user, no admin rights).",
+        "本应用可能不兼容你的操作系统：它需要 Windows 8 / 8.1 / 10 / 11（x64）。":
+            "This app may not work on your operating system: it requires Windows 8 / 8.1 / 10 / 11 (x64).",
         "单 EXE 文件，无需额外 DLL，也不需要安装任何额外运行库——密码学全部使用 Windows 自带的 CNG。": "A single EXE with no extra DLLs and nothing else to install — all cryptography uses the CNG built into Windows.",
         "Windows x64 单文件无外部依赖，与图形界面版本格式互通，适合脚本与批量处理。": "Windows x64 single binary with no external dependencies, format-compatible with the GUI, ideal for scripts and batch jobs.",
         "FileEncryptor - 安全、高效的文件加密工具": "FileEncryptor - Secure, fast file encryption",
@@ -900,7 +984,24 @@
         }
     }
 
+    // 操作系统兼容性检测：本程序依赖 Windows 8+ 的 CNG PBKDF2。
+    // Windows NT 6.2 = Win8，6.3 = Win8.1，10.0 = Win10/11。
+    function checkOs() {
+        var ua = navigator.userAgent || "";
+        var m = /Windows NT (\d+\.\d+)/.exec(ua);
+        var ok = false;
+        if (m) ok = (parseFloat(m[1]) >= 6.2);
+        if (!ok) {
+            var el = document.getElementById("osWarn");
+            if (el) el.style.display = "block";
+        }
+    }
+
+    // 供版本切换等外部逻辑在改动 DOM 后重新翻译
+    window.__feApplyLang = apply;
+
     window.addEventListener("DOMContentLoaded", function () {
+        checkOs();
         var btn = document.getElementById("langToggle");
         if (btn) {
             btn.addEventListener("click", function () {

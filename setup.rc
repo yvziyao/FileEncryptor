@@ -1,0 +1,12 @@
+// setup.rc - 安装程序的资源脚本：把两个 exe 以 RCDATA 形式嵌进来。
+// 注意：RCDATA 引用的文件必须先生成（先构建 GUI 与 CLI，再编译本文件）。
+#include <windows.h>
+#include "setup_res.h"
+
+IDI_SETUP_ICON ICON "favicon.ico"
+
+// 1 = 应用程序清单（RT_MANIFEST = 24）；提权级别写在这里
+1 24 "setup.manifest"
+
+IDR_PAYLOAD_GUI RCDATA "x64\\Release\\FileEncryptor.exe"
+IDR_PAYLOAD_CLI RCDATA "x64\\Release\\enc.exe"

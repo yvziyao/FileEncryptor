@@ -388,23 +388,48 @@ ID2D1Factory* D2DFactory() {
 // BeginDraw/EndDraw 不再产生任何像素（只有第一次的绘制会落到 DC 上），
 // 会导致同一窗口里后续绘制的元素（状态栏底色、输入框白框、卡片描边）静默丢失。
 // 因此每次绘制都新建一个渲染目标，用完立即释放。
+// 渲染目标缓存。
+//
+// 之前每调用一次绘制就 CreateDCRenderTarget 一次，画一个按钮要建 3~5 个
+// D3D/D2D 渲染目标。高负载时（打开文件对话框、安全删除大文件）创建会变慢甚至
+// 失败，失败就被静默跳过 —— 表现为按钮背景/圆角时有时无（渲染不全）。
+//
+// 现在复用同一个目标，每次只重新 BindDC（D2D 允许反复绑定）。
+// 注意：调用方拿到后会 Release()，所以这里要 AddRef 补回缓存自己那份引用。
+// 只允许 UI 线程使用（本项目所有绘制都在 UI 线程）。
+ID2D1DCRenderTarget* g_cachedRt = nullptr;
+
+void DropCachedD2DTarget() {
+    if (g_cachedRt) {
+        g_cachedRt->Release();
+        g_cachedRt = nullptr;
+    }
+}
+
 ID2D1DCRenderTarget* D2DTargetFor(HDC dc, const RECT& rc) {
     ID2D1Factory* factory = D2DFactory();
     if (!factory) return nullptr;
 
-    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
-        0.0f, 0.0f,
-        D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE);
+    if (!g_cachedRt) {
+        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            0.0f, 0.0f,
+            D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE);
+        if (FAILED(factory->CreateDCRenderTarget(&props, &g_cachedRt)) || !g_cachedRt) {
+            g_cachedRt = nullptr;
+            return nullptr;
+        }
+    }
 
-    ID2D1DCRenderTarget* rt = nullptr;
-    if (FAILED(factory->CreateDCRenderTarget(&props, &rt)) || !rt) return nullptr;
-    if (FAILED(rt->BindDC(dc, &rc))) {
-        rt->Release();
+    if (FAILED(g_cachedRt->BindDC(dc, &rc))) {
+        // 绑定失败：丢掉缓存，下次重建；本次让调用方走 GDI 兜底
+        DropCachedD2DTarget();
         return nullptr;
     }
-    return rt;
+
+    g_cachedRt->AddRef();   // 调用方会 Release，这里补上缓存自己那份
+    return g_cachedRt;
 }
 
 D2D1_COLOR_F ToD2D(COLORREF c) {
