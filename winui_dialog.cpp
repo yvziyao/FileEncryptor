@@ -332,6 +332,19 @@ struct UiDlgState {
     int         closeResult = IDCANCEL;
     float       closeAlpha = 0.0f;
 
+    // 重排（例如在「永久删除文件 / 禁止解密」间切换）时的滑动动画：
+    // 窗口高度和受影响控件的位置一起做缓动，避免高度"瞬跳"。
+    struct HAnimCtl {
+        HWND h = nullptr;
+        RECT from{};
+        RECT to{};
+    };
+    bool                  hAnim = false;
+    int                   hAnimFromH = 0;
+    int                   hAnimToH = 0;
+    ULONGLONG             hAnimStart = 0;
+    std::vector<HAnimCtl> hAnimCtls;
+
     // ---- 设置对话框 ----
     struct SegRow {
         std::wstring              label;
@@ -1791,6 +1804,41 @@ void BeginCloseDialog(HWND hDlg, UiDlgState* st, int result) {
     EnsureDlgAnimation(hDlg);
 }
 
+// 重排滑动：窗口高度 + 受影响控件位置一起缓动（约 180ms，ease-out）。
+static float HAnimEase(float t) { return 1.0f - (1.0f - t) * (1.0f - t); }
+
+static void TickDialogHeightAnim(HWND hDlg, UiDlgState* st, bool& active) {
+    if (!st->hAnim) return;
+    const float dur = 0.18f;
+    float t = (float)(GetTickCount64() - st->hAnimStart) / 1000.0f / dur;
+    if (t >= 1.0f) t = 1.0f;
+    const float e = HAnimEase(t);
+
+    for (auto& c : st->hAnimCtls) {
+        if (!c.h) continue;
+        const int l = c.from.left + (int)((c.to.left - c.from.left) * e);
+        const int tp = c.from.top + (int)((c.to.top - c.from.top) * e);
+        const int r = c.from.right + (int)((c.to.right - c.from.right) * e);
+        const int b = c.from.bottom + (int)((c.to.bottom - c.from.bottom) * e);
+        SetWindowPos(c.h, NULL, l, tp, r - l, b - tp, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    const int h = st->hAnimFromH + (int)((st->hAnimToH - st->hAnimFromH) * e);
+    RECT wr;
+    GetWindowRect(hDlg, &wr);
+    SetWindowPos(hDlg, NULL, wr.left, wr.top, wr.right - wr.left, h,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(hDlg, NULL, FALSE);
+
+    if (t >= 1.0f) {
+        st->hAnim = false;
+        st->hAnimCtls.clear();
+    }
+    else {
+        active = true;
+    }
+}
+
 void TickDialogAnimation(HWND hDlg, UiDlgState* st) {
     const ULONGLONG now = GetTickCount64();
     float dt = st->lastAnimTick ? (float)(now - st->lastAnimTick) / 1000.0f
@@ -1847,6 +1895,9 @@ void TickDialogAnimation(HWND hDlg, UiDlgState* st) {
 
     // 3) 设置对话框：选中底色的滑动动画
     if (st->isSettings) TickSettingsSlide(hDlg, st, dt, active);
+
+    // 4) 重排时的窗口高度 / 控件位置滑动
+    TickDialogHeightAnim(hDlg, st, active);
 
     if (!active) {
         KillTimer(hDlg, DLG_ANIM_TIMER);
@@ -1927,25 +1978,88 @@ void PositionPasswordControls(UiDlgState* st, bool noRedraw = false) {
 }
 
 void RelayoutDialog(HWND hDlg, UiDlgState* st) {
+    RECT wr;
+    GetWindowRect(hDlg, &wr);
+    const int oldH = wr.bottom - wr.top;
+
+    // 记录控件当前位置：动画要它们从这里滑到新位置
+    std::vector<UiDlgState::HAnimCtl> fromCtl;
+    if (st->isPassword) {
+        POINT org = { 0, 0 };
+        ClientToScreen(hDlg, &org);
+        auto push = [&](HWND h) {
+            if (!h) return;
+            RECT r;
+            GetWindowRect(h, &r);
+            UiDlgState::HAnimCtl c;
+            c.h = h;
+            c.from = { r.left - org.x, r.top - org.y, r.right - org.x, r.bottom - org.y };
+            fromCtl.push_back(c);
+        };
+        push(st->edit1);
+        push(st->edit2);
+        push(st->chkShow);
+        push(st->chkDecoy);
+        push(st->chkProt);
+        push(st->editTries);
+        push(st->editDays);
+        for (HWND b : st->btns) push(b);
+    }
+
     HDC screen = GetDC(NULL);
     HDC mem = CreateCompatibleDC(screen);
     ComputeLayout(st, mem);
     DeleteDC(mem);
     ReleaseDC(NULL, screen);
 
-    RECT wr;
-    GetWindowRect(hDlg, &wr);
     const int cx = wr.left + (wr.right - wr.left) / 2;
     const int cy = wr.top + (wr.bottom - wr.top) / 2;
-    // 重排期间一律不画（SWP_NOREDRAW）：窗口改尺寸、子控件挪位置的过程中
-    // 如果让系统边改边画，就会看到"旧位置残留 + 新位置还没画"的闪烁。
-    // 全部改完之后再一次性重画，只擦一帧。
-    SetWindowPos(hDlg, NULL, cx - st->winW / 2, cy - st->winH / 2, st->winW, st->winH,
+
+    // 已显示且高度确实要变 -> 走滑动动画；否则一帧到位
+    const int dh = st->winH - oldH;
+    const bool animate = st->isPassword && !st->closing && IsWindowVisible(hDlg) &&
+                         oldH > 0 && (dh > 2 || dh < -2);
+
+    if (!animate) {
+        // 重排期间一律不画：边改边画会露出中间态（闪烁）
+        SetWindowPos(hDlg, NULL, cx - st->winW / 2, cy - st->winH / 2, st->winW, st->winH,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+        PositionPasswordControls(st, /*noRedraw=*/true);
+        PositionButtons(st);
+        RedrawWindow(hDlg, NULL, NULL,
+                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        return;
+    }
+
+    // 1) 先摆到最终位置，读出目标矩形（宽度不变，顶部保持不动）
+    SetWindowPos(hDlg, NULL, wr.left, wr.top, st->winW, oldH,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
     PositionPasswordControls(st, /*noRedraw=*/true);
     PositionButtons(st);
-    RedrawWindow(hDlg, NULL, NULL,
-                 RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+
+    // 2) 把控件退回起始位置，交给动画逐帧滑过去
+    st->hAnimCtls.clear();
+    {
+        POINT org = { 0, 0 };
+        ClientToScreen(hDlg, &org);
+        for (auto& c : fromCtl) {
+            if (!c.h) continue;
+            RECT r;
+            GetWindowRect(c.h, &r);
+            c.to = { r.left - org.x, r.top - org.y, r.right - org.x, r.bottom - org.y };
+            SetWindowPos(c.h, NULL, c.from.left, c.from.top,
+                         c.from.right - c.from.left, c.from.bottom - c.from.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+            st->hAnimCtls.push_back(c);
+        }
+    }
+
+    st->hAnim = true;
+    st->hAnimFromH = oldH;
+    st->hAnimToH = st->winH;
+    st->hAnimStart = GetTickCount64();
+    EnsureDlgAnimation(hDlg);
+    InvalidateRect(hDlg, NULL, FALSE);
 }
 
 void ApplySettingsRowChange(HWND hDlg, UiDlgState* st, int key) {
