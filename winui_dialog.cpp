@@ -1906,6 +1906,7 @@ void PositionPasswordControls(UiDlgState* st) {
         GetClassNameW(h, cls, 32);
         if (wcscmp(cls, L"Edit") == 0) ApplyEditRoundRegion(h);
         ShowWindow(h, visible ? SW_SHOW : SW_HIDE);
+        InvalidateRect(h, NULL, TRUE);   // 位置/尺寸变了，内容要重画
     };
     RECT none = {};
     move(st->edit1, st->rEdit1Inner, true);
@@ -1935,7 +1936,11 @@ void RelayoutDialog(HWND hDlg, UiDlgState* st) {
                  SWP_NOZORDER | SWP_NOACTIVATE);
     PositionPasswordControls(st);
     PositionButtons(st);
-    InvalidateRect(hDlg, NULL, FALSE);
+    // 窗口尺寸/内容变了必须连子控件一起重画。
+    // 只 InvalidateRect(父窗口) 的话自绘按钮不会重新绘制，
+    // 旧布局的像素会留在原地，看起来像"同一行出现了两次"。
+    RedrawWindow(hDlg, NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 void ApplySettingsRowChange(HWND hDlg, UiDlgState* st, int key) {
