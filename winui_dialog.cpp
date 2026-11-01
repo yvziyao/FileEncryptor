@@ -1054,9 +1054,12 @@ LRESULT CALLBACK HelpTipProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
+        HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc;
         GetClientRect(hwnd, &rc);
+        // 提示窗会随悬停目标移动/改尺寸，直接画到窗口 DC 会闪，这里也走双缓冲
+        UiDoubleBuffer buffer(hdc, rc);
+        HDC dc = buffer.Dc();
         const UiPalette& c = UiColors();
         UiFillRect(dc, rc, c.bgAlt);
         UiDrawRoundRect(dc, rc, UiPx(6), false, c.bgAlt, true, c.border);
@@ -1151,7 +1154,7 @@ void SetHelpTipVisible(UiDlgState* st, bool visible) {
 
     SetWindowPos(st->hTip, HWND_TOPMOST, p.x, p.y, w, h,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(st->hTip, NULL, TRUE);
+    InvalidateRect(st->hTip, NULL, FALSE);
 }
 
 void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {    const UiPalette& c = UiColors();
@@ -1895,24 +1898,26 @@ void PositionButtons(UiDlgState* st) {
 // 分段选项变化后重新布局：“指定目录”的提示行会让窗口变高/变矮
 // 把密码框的子控件摆到 ComputeLayout 算出的位置。
 // 保护区分段控件切换模式时窗口高度会变，必须重新摆放（含显示/隐藏锁定时长输入框）。
-void PositionPasswordControls(UiDlgState* st) {
+void PositionPasswordControls(UiDlgState* st, bool noRedraw = false) {
     if (!st->isPassword) return;
-    auto move = [](HWND h, const RECT& r, bool visible) {
+    // noRedraw = true 时只挪位置不重画，等调用方整体画一次 —— 避免重排过程中
+    // 出现"先画一半、再画一半"的中间态（也就是肉眼看到的闪烁）。
+    auto move = [noRedraw](HWND h, const RECT& r, bool visible) {
         if (!h) return;
         SetWindowPos(h, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+                     SWP_NOZORDER | SWP_NOACTIVATE | (noRedraw ? SWP_NOREDRAW : 0u));
         // 尺寸变了必须重算圆角区域，否则从 0 尺寸创建出来的控件会一直是空区域
         wchar_t cls[32] = {};
         GetClassNameW(h, cls, 32);
         if (wcscmp(cls, L"Edit") == 0) ApplyEditRoundRegion(h);
         ShowWindow(h, visible ? SW_SHOW : SW_HIDE);
-        InvalidateRect(h, NULL, TRUE);   // 位置/尺寸变了，内容要重画
+        if (!noRedraw) InvalidateRect(h, NULL, FALSE);   // 不擦背景，避免闪一下
     };
     RECT none = {};
     move(st->edit1, st->rEdit1Inner, true);
     move(st->edit2, st->rEdit2Inner, st->confirm);
     move(st->chkShow, st->rChk, true);
-        move(st->chkDecoy, st->rChkDecoy, true);
+    move(st->chkDecoy, st->rChkDecoy, true);
     if (st->showProtection) {
         const bool showDays = (st->prot.action == 1);
         move(st->chkProt, st->rChkProt, true);
@@ -1932,15 +1937,15 @@ void RelayoutDialog(HWND hDlg, UiDlgState* st) {
     GetWindowRect(hDlg, &wr);
     const int cx = wr.left + (wr.right - wr.left) / 2;
     const int cy = wr.top + (wr.bottom - wr.top) / 2;
+    // 重排期间一律不画（SWP_NOREDRAW）：窗口改尺寸、子控件挪位置的过程中
+    // 如果让系统边改边画，就会看到"旧位置残留 + 新位置还没画"的闪烁。
+    // 全部改完之后再一次性重画，只擦一帧。
     SetWindowPos(hDlg, NULL, cx - st->winW / 2, cy - st->winH / 2, st->winW, st->winH,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-    PositionPasswordControls(st);
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+    PositionPasswordControls(st, /*noRedraw=*/true);
     PositionButtons(st);
-    // 窗口尺寸/内容变了必须连子控件一起重画。
-    // 只 InvalidateRect(父窗口) 的话自绘按钮不会重新绘制，
-    // 旧布局的像素会留在原地，看起来像"同一行出现了两次"。
     RedrawWindow(hDlg, NULL, NULL,
-                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                 RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 void ApplySettingsRowChange(HWND hDlg, UiDlgState* st, int key) {
