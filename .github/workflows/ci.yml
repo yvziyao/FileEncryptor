@@ -31,4 +31,5 @@ jobs:
           **/x64/Release/*.exe
           **/Release/*.exe
 
-# Note: OpenSSL dependency may require additional setup on the runner (vcpkg install openssl:x64-windows).
+# No third-party dependencies: cryptography is provided by the Windows CNG (bcrypt),
+# so only the Visual Studio toolchain and the Windows SDK are required.

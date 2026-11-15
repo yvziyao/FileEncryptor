@@ -44,8 +44,6 @@ std::wstring PickFolderDialog(HWND owner, const std::wstring& initial);
 #define IDC_UI_TRIES    2005
 #define IDC_UI_DAYS     2006
 #define IDC_UI_CHK_DECOY 2007   // 可否认加密：使用诱饵文件
-#define IDC_UI_PASSES    2008   // 设置：安全删除覆写次数（数字输入框）
-#define IDC_GEN_PWD      2009   // 密码框：随机生成按钮（自绘，不是真控件）
 #define IDC_UI_GENLEN    2010   // 设置：随机密码位数
 #define IDC_SELECTABLE   2011   // 消息框：可选中复制的只读文本框
 
@@ -58,6 +56,11 @@ namespace {
 // ---------------------------------------------------------------- 工具
 
 int MaxI(int a, int b) { return a > b ? a : b; }
+
+// 自绘复选框的统一度量（设计像素）：方框边长 + 方框与文字的间距。
+// 布局函数与 DrawOwnerCheckbox 必须共用同一组值，否则文字会和方框错位。
+constexpr int kChkBoxDp = 18;
+constexpr int kChkGapDp = 8;
 
 std::string WstringToUtf8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -236,6 +239,13 @@ struct UiDlgState {
     // 设置面板：「禁用诱饵文件」复选框
     int               decoyDisabled = 0;
     RECT              rDecoyBox{}, rDecoyLabel{}, rDecoyHelp{};
+    // 消息框可选的「不再提示」复选框（父窗口自绘）
+    RECT              rCheckBox{}, rCheckLabel{};
+    std::wstring      checkText;
+    bool              checkValue = false;
+
+    // 焦点环只在"用键盘操作"时显示：鼠标点过之后隐藏（与主窗口一致）
+    bool              showFocusRing = false;
     // 设置面板：「加密后保留源文件」复选框
     int               keepSource = 0;
     RECT              rKeepBox{}, rKeepLabel{};
@@ -262,6 +272,7 @@ struct UiDlgState {
     std::wstring      selectableText;
     bool              hasSelectable = false;
     RECT              rSelectable{};
+    RECT              rSelectableInner{};   // 真实 EDIT（在 32px 白框内垂直居中）
     HWND              editSelectable = nullptr;
     // 设置面板左下角的「双击赞助」小按钮
     RECT              rSponsor{};
@@ -269,12 +280,6 @@ struct UiDlgState {
     // 设置面板：「在资源管理器右键菜单中显示」
     int               shellMenu = 1;
     RECT              rMenuBox{}, rMenuLabel{};
-    // 设置面板：「安全删除覆写次数」数字输入框（第 3 行，替换原来的分段控件）
-    HWND              editPasses = nullptr;
-    RECT              rPassesEdit{}, rPassesHint{};
-    std::wstring      passesHint;          // 空 = 不显示提示
-    bool              passesError = false; // true = 红色错误，false = 橙色警告
-    bool              passesValid = true;
     std::vector<HWND> btns;        // 与 btnIds / btnWidths 同序（左 -> 右）
     std::vector<int>  btnIds;
     std::vector<int>  btnWidths;
@@ -292,6 +297,7 @@ struct UiDlgState {
     HWND         focusedEdit = nullptr;   // 当前获得焦点的输入框，用于画蓝色聚焦边框
     std::wstring password;
     std::wstring error;
+    bool         errorOnPassword = true;  // error 是否与密码本身有关：只给密码框描红边
     int          strengthLevel = 0;   // 0=未输入 1=很弱 2=一般 3=良好 4=很强
     std::wstring subtitle;            // 标题下方的补充说明（批量时显示当前文件路径）
 
@@ -344,7 +350,7 @@ struct UiDlgState {
         float                     animTo = 0.0f;
         ULONGLONG                 animStart = 0;
         bool                      animActive = false;
-        int                       key = 0;      // 0=语言 1=主题 2=输出位置 3=安全删除 4=完成后 5=加密强度
+        int                       key = 0;      // 0=语言 1=主题 2=输出位置 3=安全删除 4=加密强度
         RECT                      labelRc{};
         RECT                      segRc{};
         std::vector<RECT>         itemRc;
@@ -352,6 +358,9 @@ struct UiDlgState {
     bool                     isSettings = false;
     std::vector<SegRow>      rows;
     int                      focusedRow = 0;
+    // 鼠标悬停中的自绘元素编号（0=无）：设置面板的复选框/胶囊没有子窗口，
+    // 悬停反馈只能父窗口自己跟踪。编号含义见 SettingsHotItem。
+    int                      hotItem = 0;
     UiSettingsData           data;
     RECT                     hintRc{};
     bool                     hintVisible = false;
@@ -407,14 +416,10 @@ std::wstring DecoyTip() {
 // 定义在后面（绘制区），这里先声明，供布局函数调用
 void SyncHelpTooltip(UiDlgState* st);
 
-// 诱饵复选框的悬停说明文案
-std::wstring DecoyTip();
-
 // 设置面板里「禁用诱饵文件」复选框的文案（布局与绘制共用，必须一致）
 std::wstring DecoyChkLabel() {
     return tr(L"禁用诱饵文件（加密后体积不再翻倍）", L"Disable decoy (no size doubling)");
 }
-// 「加密后保留源文件」复选框文案
 // 随机密码生成器：4 个类别复选框的文字
 std::wstring GenClassLabel(int i) {
     switch (i) {
@@ -446,6 +451,7 @@ void UpdateGenHint(UiDlgState* st) {
     }
 }
 
+// 「加密后保留源文件」复选框文案
 std::wstring KeepChkLabel() {
     return tr(L"加/解密后保留源文件（不删除）", L"Keep source files after encrypting/decrypting");
 }
@@ -468,7 +474,8 @@ std::wstring DecoyChkTip() {
         L"Only enable this if you do not need the decoy feature.");
 }
 
-void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(UiPx(18), true);
+void ComputeSettingsLayout(UiDlgState* st, HDC dc) {
+    HFONT fTitle = UiFont(UiPx(18), true);
 
     st->pad = UiPx(24);
     st->btnH = UiPx(32);
@@ -479,18 +486,26 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
     st->titleH = titleH > 0 ? titleH : UiPx(24);
 
     const int rowH = UiPx(34);
-    const int rowGap = UiPx(14);
-    const int labelW = UiPx(132);
+    const int rowGap = UiPx(12);
+    int labelW = UiPx(132);          // 按当前语言实测后可能放宽（见下）
     const int hintH = UiPx(18);
 
     int winW = UiPx(560);
     // 保证标题与所有行都放得下
     {
         HFONT fBody = UiFont(UiPx(14), false);
+        // 标签列宽按实测取最大值：英文 "Generated password length" 有 185px，
+        // 固定 132px 会把标签直接截断（中文标签最宽才 112px，所以之前没暴露）。
+        auto growLabelW = [&](const std::wstring& s) {
+            int lw = 0, lh = 0;
+            MeasureText(dc, fBody, s, UiPx(400), true, &lw, &lh);
+            if (lw + UiPx(8) > labelW) labelW = lw + UiPx(8);
+        };
+        for (const auto& r : st->rows) growLabelW(r.label);
+        growLabelW(GenLenLabel());   // 随机密码位数那一行的标签共用同一列
+
         int needW = titleW + st->pad * 2;
         for (const auto& r : st->rows) {
-            int lw = 0, lh = 0;
-            MeasureText(dc, fBody, r.label, UiPx(400), true, &lw, &lh);
             int optsW = 0;
             for (const auto& o : r.options) {
                 int ow = 0, oh = 0;
@@ -499,9 +514,7 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
             }
             const int rowNeed = st->pad * 2 + labelW + UiPx(16) + optsW;
             if (rowNeed > needW) needW = rowNeed;
-            (void)lw;
         }
-
 
         if (needW > winW) winW = needW;
     }
@@ -511,7 +524,7 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
 
     int y = st->pad;
     st->titleY = y;
-    y += st->titleH + UiPx(18);
+    y += st->titleH + UiPx(16);
 
     st->hintVisible = false;
     for (auto& r : st->rows) {
@@ -534,7 +547,7 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         if (r.key == 2 && r.selected == 1) {
             st->hintRc = { segLeft, y - rowGap + UiPx(2), st->contentX + st->contentW, y - rowGap + UiPx(2) + hintH };
             st->hintVisible = true;
-            y += hintH + UiPx(6);
+            y += hintH + UiPx(8);
         }
     }
 
@@ -543,12 +556,12 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         HFONT fBody = UiFont(UiPx(14), false);
         int lw = 0, lh = 0;
         MeasureText(dc, fBody, DecoyChkLabel(), UiPx(520), true, &lw, &lh);
-        const int boxW = UiPx(18);
+        const int boxW = UiPx(kChkBoxDp);
         const int chkH = UiPx(26);
         const int boxTop = y + (chkH - boxW) / 2;
         st->rDecoyBox   = { st->contentX, boxTop, st->contentX + boxW, boxTop + boxW };
-        st->rDecoyLabel = { st->rDecoyBox.right + UiPx(8), y,
-                            st->rDecoyBox.right + UiPx(8) + lw, y + chkH };
+        st->rDecoyLabel = { st->rDecoyBox.right + UiPx(kChkGapDp), y,
+                            st->rDecoyBox.right + UiPx(kChkGapDp) + lw, y + chkH };
         const int hs = UiPx(16);
         const int hx = st->rDecoyLabel.right + UiPx(6);
         st->rDecoyHelp  = { hx, y + (chkH - hs) / 2, hx + hs, y + (chkH - hs) / 2 + hs };
@@ -560,12 +573,12 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         HFONT fBody = UiFont(UiPx(14), false);
         int lw = 0, lh = 0;
         MeasureText(dc, fBody, KeepChkLabel(), UiPx(520), true, &lw, &lh);
-        const int boxW = UiPx(18);
+        const int boxW = UiPx(kChkBoxDp);
         const int chkH = UiPx(26);
         const int boxTop = y + (chkH - boxW) / 2;
         st->rKeepBox   = { st->contentX, boxTop, st->contentX + boxW, boxTop + boxW };
-        st->rKeepLabel = { st->rKeepBox.right + UiPx(8), y,
-                           st->rKeepBox.right + UiPx(8) + lw, y + chkH };
+        st->rKeepLabel = { st->rKeepBox.right + UiPx(kChkGapDp), y,
+                           st->rKeepBox.right + UiPx(kChkGapDp) + lw, y + chkH };
         y += chkH + rowGap;
     }
 
@@ -574,19 +587,19 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         HFONT fBody = UiFont(UiPx(14), false);
         int lw = 0, lh = 0;
         MeasureText(dc, fBody, MenuChkLabel(), UiPx(520), true, &lw, &lh);
-        const int boxW = UiPx(18);
+        const int boxW = UiPx(kChkBoxDp);
         const int chkH = UiPx(26);
         const int boxTop = y + (chkH - boxW) / 2;
         st->rMenuBox   = { st->contentX, boxTop, st->contentX + boxW, boxTop + boxW };
-        st->rMenuLabel = { st->rMenuBox.right + UiPx(8), y,
-                           st->rMenuBox.right + UiPx(8) + lw, y + chkH };
+        st->rMenuLabel = { st->rMenuBox.right + UiPx(kChkGapDp), y,
+                           st->rMenuBox.right + UiPx(kChkGapDp) + lw, y + chkH };
         y += chkH + rowGap;
     }
 
     // ---- 随机密码生成器：4 个类别复选框（一行）+ 位数输入框 + 弱提示 ----
     {
         HFONT fBody = UiFont(UiPx(14), false);
-        const int boxW = UiPx(18);
+        const int boxW = UiPx(kChkBoxDp);
         const int chkH = UiPx(26);
         int x = st->contentX;
         for (int i = 0; i < 4; ++i) {
@@ -594,10 +607,11 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
             st->rGenBox[i] = { x, boxTop, x + boxW, boxTop + boxW };
             int lw = 0, lh = 0;
             MeasureText(dc, fBody, GenClassLabel(i), UiPx(220), true, &lw, &lh);
-            st->rGenLabel[i] = { x + boxW + UiPx(6), y, x + boxW + UiPx(6) + lw, y + chkH };
-            x = st->rGenLabel[i].right + UiPx(18);
+            st->rGenLabel[i] = { x + boxW + UiPx(kChkGapDp), y,
+                                 x + boxW + UiPx(kChkGapDp) + lw, y + chkH };
+            x = st->rGenLabel[i].right + UiPx(16);
         }
-        y += chkH + UiPx(6);
+        y += chkH + UiPx(8);
 
         st->rGenLenLabel = { st->contentX, y, st->contentX + labelW, y + rowH };
         const int editW = UiPx(72);
@@ -609,7 +623,7 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         // 提示行始终占位：有提示时窗口尺寸不跳动
         st->rGenHint = { st->contentX + labelW + UiPx(16), y,
                          st->contentX + st->contentW, y + hintH };
-        y += hintH + UiPx(6);
+        y += hintH + UiPx(8);
     }
 
     // 左下角留一个「双击赞助」的小按钮（右侧的确定/取消由 PositionButtons 右对齐）。
@@ -653,8 +667,18 @@ void ComputeSettingsLayout(UiDlgState* st, HDC dc) {    HFONT fTitle = UiFont(Ui
         }
         if (!st->btnIds.empty())
             totalBtnW += st->btnGap * (int)(st->btnIds.size() - 1);
+        // 左下的胶囊（赞助 / 检查更新）和右对齐的按钮在同一行，不能压在一起：
+        // 原来只按按钮宽度算，英文界面下「检查更新」会顶到「确定」按钮上。
+        const int pillRight = IsRectEmpty(&st->rUpdateBtn) ? st->rSponsor.right
+                                                           : st->rUpdateBtn.right;
+        const int needPillW = pillRight + st->btnGap + totalBtnW + st->pad;
         const int needBtnW = st->pad * 2 + totalBtnW;
-        if (winW < needBtnW) {
+        if (winW < needPillW) {
+            winW = needPillW;
+            st->btnArea.right = winW - st->pad;
+            st->contentW = winW - st->pad * 2;
+        }
+        else if (winW < needBtnW) {
             winW = needBtnW;
             st->btnArea.right = winW - st->pad;
             st->contentW = winW - st->pad * 2;
@@ -703,7 +727,7 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
 
         // 防暴力破解设置区比较宽（复选框 + 次数输入框 + 分段控件），要单独算最小宽度
         if (st->showProtection) {
-            int w = 0, h = 0;
+            int w = 0;
             auto add = [&](const std::wstring& s) {
                 int tw = 0, th = 0;
                 MeasureText(dc, fBody, s, maxBodyW, true, &tw, &th);
@@ -719,7 +743,6 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
             add(tr(L"禁止解密", L"Lock"));
             w += UiPx(14) * 2;
             if (w > minContent) minContent = w;
-            (void)h;
         }
 
         winW = st->pad * 2 + MaxI(titleW, minContent);
@@ -762,7 +785,8 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
 
         // 副标题：批量处理时指明当前正在为哪个文件设置密码
         if (!st->subtitle.empty()) {
-            const int subH = UiPx(18);
+            // 13px 字体的行高约 19px：留 20px，避免高 DPI 下被裁掉底部
+            const int subH = UiPx(20);
             st->rSubtitle = { st->contentX, y, st->contentX + st->contentW, y + subH };
             y += subH + UiPx(12);
         }
@@ -856,7 +880,13 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
             }
         }
 
-        st->rChk = { st->contentX, y, st->contentX + st->contentW, y + UiPx(22) };
+        // 复选框只包住方框 + 文字，别铺满整行：否则整行都是它的热区，
+        // 鼠标停在右边空白处也会高亮、点空白也会切换。
+        int showW = 0, showH = 0;
+        MeasureText(dc, fBody, tr(L"显示密码", L"Show password"), UiPx(420), true,
+                    &showW, &showH);
+        st->rChk = { st->contentX, y,
+                     st->contentX + UiPx(kChkBoxDp) + UiPx(kChkGapDp) + showW, y + UiPx(22) };
         y += UiPx(22) + UiPx(6);
 
         // 诱饵文件（可否认加密）：只在加密单个文件时提供
@@ -867,7 +897,7 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
                         tr(L"使用诱饵文件（可否认加密）", L"Use a decoy file (deniable)"),
                         UiPx(420), true, &lw, &lh);
             const int chkH = UiPx(22);
-            const int chkW = UiPx(18) + UiPx(10) + lw;   // 与 DrawOwnerCheckbox 的 box+gap 对齐
+            const int chkW = UiPx(kChkBoxDp) + UiPx(kChkGapDp) + lw;   // 与 DrawOwnerCheckbox 的 box+gap 对齐
             st->rChkDecoy = { st->contentX, y, st->contentX + chkW, y + chkH };
             const int hs = UiPx(16);
             const int hx = st->rChkDecoy.right + UiPx(4);
@@ -890,13 +920,30 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
 
         // 「可选中复制」的行（随机密码）：正文下面放一个只读编辑框
         if (st->hasSelectable) {
-            st->rSelectable = { st->contentX, y, st->contentX + st->contentW, y + UiPx(30) };
-            y += UiPx(30) + UiPx(14);
+            st->rSelectable = { st->contentX, y, st->contentX + st->contentW, y + UiPx(32) };
+            y += UiPx(32) + UiPx(14);
         }
         else {
             st->rSelectable = {};
             y += UiPx(14);
         }
+    }
+
+    // 「不再提示」复选框（仅消息框）：单独一行，放在按钮上方
+    if (!st->isPassword && !st->checkText.empty()) {
+        const int chkH = UiPx(22);
+        const int boxW = UiPx(18);
+        const int gap = UiPx(10);
+        int tw = 0, th = 0;
+        MeasureText(dc, fBody, st->checkText, st->contentW - boxW - gap, true, &tw, &th);
+        st->rCheckBox = { st->contentX, y, st->contentX + boxW, y + chkH };
+        st->rCheckLabel = { st->rCheckBox.right + gap, y,
+                            st->rCheckBox.right + gap + tw, y + chkH };
+        y += chkH + UiPx(12);
+    }
+    else {
+        st->rCheckBox = {};
+        st->rCheckLabel = {};
     }
 
     st->btnArea = { st->pad, y, winW - st->pad, y + st->btnH };
@@ -906,9 +953,9 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
     st->winH = y;
 
     // 真实 EDIT 控件：只用“文字行高 + 2px”，在 32px 白框内垂直居中
-    st->editInnerH = TextCellHeight(dc, fBody) + 2;
-    if (st->editInnerH > st->editH) st->editInnerH = st->editH;
-    st->editInnerOffset = (st->editH - st->editInnerH) / 2;
+    const int textCellH = TextCellHeight(dc, fBody) + 2;
+    st->editInnerH = (st->editH > 0 && textCellH > st->editH) ? st->editH : textCellH;
+    st->editInnerOffset = (st->editH > 0) ? (st->editH - st->editInnerH) / 2 : 0;
 
     auto innerOf = [&](const RECT& well) {
         RECT r = { well.left, well.top + st->editInnerOffset,
@@ -917,6 +964,18 @@ void ComputeLayout(UiDlgState* st, HDC dc) {
     };
     st->rEdit1Inner = innerOf(st->rEdit1);
     st->rEdit2Inner = innerOf(st->rEdit2);
+
+    // 消息框里的只读文本框同理：白框 32px，真正 EDIT 只取文字行高，
+    // 否则 14px 字体的行高（约 19px）塞不进 18px 的 EDIT，底部会被裁掉。
+    if (!IsRectEmpty(&st->rSelectable)) {
+        const int wellH = st->rSelectable.bottom - st->rSelectable.top;
+        int innerH = textCellH;
+        if (innerH > wellH) innerH = wellH;
+        const int off = (wellH - innerH) / 2;
+        st->rSelectableInner = st->rSelectable;
+        st->rSelectableInner.top += off;
+        st->rSelectableInner.bottom = st->rSelectableInner.top + innerH;
+    }
     if (st->showGenButton) {
         // 给右边的「随机生成」按钮让出位置，否则文字会压在按钮下面
         st->rEdit1Inner.right = st->rGenBtn.left - UiPx(6);
@@ -950,7 +1009,7 @@ void DrawOwnerButton(LPDRAWITEMSTRUCT pdis) {
     const UiDlgState* dlgSt = StateOf(GetParent(pdis->hwndItem));
     // 蓝色主按钮：优先用对话框指定的，默认仍按 ID 推断
     const bool primary = (dlgSt && dlgSt->primaryId)
-        ? (pdis->CtlID == dlgSt->primaryId)
+        ? ((int)pdis->CtlID == dlgSt->primaryId)
         : (pdis->CtlID == IDOK || pdis->CtlID == IDYES);
     const float hover = ButtonAnimValue(pdis->hwndItem);
 
@@ -975,11 +1034,20 @@ void DrawOwnerButton(LPDRAWITEMSTRUCT pdis) {
     UiFillRect(dc, rc, c.bg);
     UiDrawRoundRect(dc, rc, UiPx(5), true, fill, true, borderColor);
 
-    const std::wstring label = LabelForId(StateOf(GetParent(pdis->hwndItem)), pdis->CtlID);
+    const std::wstring label = LabelForId(dlgSt, (int)pdis->CtlID);
     RECT textRc = rc;
     // 强调色按钮用灰度抗锯齿，避免 ClearType 在饱和底色上产生彩边
     UiDrawTextLine(dc, label, textRc, UiFont(UiPx(14), false, primary), textColor,
                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    // 键盘焦点：自绘按钮没有系统焦点框，Tab 过去后看不出焦点在哪
+    // 只在最近一次是键盘操作时显示（鼠标用户不需要焦点框）
+    if (dlgSt && dlgSt->showFocusRing && (pdis->itemState & ODS_FOCUS) != 0) {
+        RECT fr = rc;
+        InflateRect(&fr, -UiPx(3), -UiPx(3));
+        UiDrawRoundRect(dc, fr, UiPx(3), false, fill, true,
+                        primary ? c.onAccent : c.accent);
+    }
 }
 
 // 自绘复选框。密码框里有两个：
@@ -998,41 +1066,6 @@ void DrawHelpIcon(HDC dc, const RECT& rc) {
         UiDrawTextLine(dc, L"?", r, f, c.textMuted,
                        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-}
-
-// 读取「安全删除覆写次数」输入框并刷新提示；返回是否合法。
-// 规则：0-10 之外 -> 红色错误；4-10 -> 橙色警告（可能伤磁盘、且变慢）；0-3 -> 无提示。
-static bool ValidatePasses(UiDlgState* st) {
-    if (!st || !st->editPasses) return true;
-
-    wchar_t buf[16] = {};
-    GetWindowTextW(st->editPasses, buf, _countof(buf));
-
-    bool digitsOnly = (buf[0] != L'\0');
-    for (const wchar_t* p = buf; *p; ++p) {
-        if (*p < L'0' || *p > L'9') { digitsOnly = false; break; }
-    }
-
-    const int v = digitsOnly ? _wtoi(buf) : -1;
-    // 范围 1-10：0 对「安全删除」没有意义（不覆写就不是安全删除）
-    if (!digitsOnly || v < 1 || v > 10) {
-        st->passesHint = tr(L"错误：请输入1-10之间的数字",
-                            L"Error: please enter a number between 1 and 10");
-        st->passesError = true;
-        st->passesValid = false;
-        return false;
-    }
-    if (v > 3) {
-        st->passesHint = tr(L"注意：覆写次数过多可能减少磁盘使用寿命，并降低删除速度",
-                            L"Note: too many passes may reduce disk lifespan and slow deletion");
-        st->passesError = false;
-        st->passesValid = true;
-        return true;
-    }
-    st->passesHint.clear();
-    st->passesError = false;
-    st->passesValid = true;
-    return true;
 }
 
 // 读取「?」图标所在的矩形（设置面板 / 密码框）；没有则返回 nullptr
@@ -1055,21 +1088,25 @@ LRESULT CALLBACK HelpTipProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        // 提示窗会随悬停目标移动/改尺寸，直接画到窗口 DC 会闪，这里也走双缓冲
-        UiDoubleBuffer buffer(hdc, rc);
-        HDC dc = buffer.Dc();
-        const UiPalette& c = UiColors();
-        UiFillRect(dc, rc, c.bgAlt);
-        UiDrawRoundRect(dc, rc, UiPx(6), false, c.bgAlt, true, c.border);
-        const UiDlgState* st =
-            reinterpret_cast<const UiDlgState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (st && !st->tipText.empty()) {
-            RECT r = rc;
-            InflateRect(&r, -UiPx(10), -UiPx(8));
-            UiDrawTextLine(dc, st->tipText, r, UiFont(UiPx(12), false), c.text,
-                           DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+        // 双缓冲必须在内层作用域里：UiDoubleBuffer 是在**析构**时才 BitBlt 到
+        // 目标 DC，如果它和 EndPaint 同层，析构发生在 EndPaint 之后，DC 已失效，
+        // 结果是窗口一片空白（"问号提示显示不出来"就是这个原因）。
+        {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            UiDoubleBuffer buffer(hdc, rc);
+            HDC dc = buffer.Dc();
+            const UiPalette& c = UiColors();
+            UiFillRect(dc, rc, c.bgAlt);
+            UiDrawRoundRect(dc, rc, UiPx(6), false, c.bgAlt, true, c.border);
+            const UiDlgState* st =
+                reinterpret_cast<const UiDlgState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (st && !st->tipText.empty()) {
+                RECT r = rc;
+                InflateRect(&r, -UiPx(10), -UiPx(8));
+                UiDrawTextLine(dc, st->tipText, r, UiFont(UiPx(12), false), c.text,
+                               DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+            }
         }
         EndPaint(hwnd, &ps);
         return 0;
@@ -1157,7 +1194,8 @@ void SetHelpTipVisible(UiDlgState* st, bool visible) {
     InvalidateRect(st->hTip, NULL, FALSE);
 }
 
-void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {    const UiPalette& c = UiColors();
+void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {
+    const UiPalette& c = UiColors();
     RECT rc = pdis->rcItem;
     UiDoubleBuffer buffer(pdis->hDC, rc);
     HDC dc = buffer.Dc();
@@ -1167,12 +1205,19 @@ void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {    const U
     const bool checked = isProt ? st->prot.enabled
                                 : (isDecoy ? st->useDecoy : st->showPwd);
 
-    const int box = UiPx(18);
+    const int box = UiPx(kChkBoxDp);
     RECT boxRc = { rc.left, rc.top + (rc.bottom - rc.top - box) / 2,
                    rc.left + box, rc.top + (rc.bottom - rc.top - box) / 2 + box };
 
+    // 复选框不是普通按钮、不走 hover 渐变：直接读悬停状态，
+    // WM_MOUSEMOVE 里会重画控件本身。
+    BtnExtra* ex = reinterpret_cast<BtnExtra*>(GetWindowLongPtrW(pdis->hwndItem, GWLP_USERDATA));
+    const bool hover = (ex && ex->hover);
+
     if (checked) {
-        UiDrawRoundRect(dc, boxRc, UiPx(4), true, c.accent, false, c.accent);
+        UiDrawRoundRect(dc, boxRc, UiPx(4), true,
+                        hover ? UiBlend(c.accent, c.accentHover, 0.6f) : c.accent,
+                        false, c.accent);
         HFONT iconFont = UiIconFont(UiPx(11));
         if (iconFont) {
             RECT glyphRc = boxRc;
@@ -1181,12 +1226,20 @@ void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {    const U
         }
     }
     else {
-        UiDrawRoundRect(dc, boxRc, UiPx(4), true, c.bgAlt, true, c.border);
+        UiDrawRoundRect(dc, boxRc, UiPx(4), true, c.bgAlt, true,
+                        hover ? c.accent : c.border);
+    }
+
+    // 键盘焦点：自绘复选框没有系统焦点框
+    if (st->showFocusRing && (pdis->itemState & ODS_FOCUS) != 0) {
+        RECT fr = boxRc;
+        InflateRect(&fr, UiPx(2), UiPx(2));
+        UiDrawRoundRect(dc, fr, UiPx(5), false, c.bg, true, c.accent);
     }
 
     if (isProt) return;   // 说明文字由父窗口画
 
-    RECT labelRc = { boxRc.right + UiPx(10), rc.top, rc.right, rc.bottom };
+    RECT labelRc = { boxRc.right + UiPx(kChkGapDp), rc.top, rc.right, rc.bottom };
     UiDrawTextLine(dc,
                    isDecoy ? tr(L"使用诱饵文件（可否认加密）", L"Use a decoy file (deniable)")
                            : tr(L"显示密码", L"Show password"),
@@ -1194,10 +1247,28 @@ void DrawOwnerCheckbox(LPDRAWITEMSTRUCT pdis, const UiDlgState* st) {    const U
                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
-// 设置对话框：分段控件（SegmentedControl）风格的自绘行
+// 设置面板：分段控件（SegmentedControl）风格的自绘行
 // 警告色（橙色）：调色板里没有，按深浅色各给一套
 static COLORREF WarningColor() {
     return UiIsDark() ? RGB(255, 190, 92) : RGB(196, 108, 0);
+}
+
+// 鼠标当前停在哪个自绘元素上（设置面板的复选框/胶囊没有子窗口，只能自己算）。
+// 0=无，1..3=诱饵/保留源文件/右键菜单，4..7=随机密码四个类别，8=检查更新，9=赞助。
+int SettingsHotItem(const UiDlgState* st, POINT pt) {
+    auto hit = [&](const RECT& box, const RECT& label) {
+        return (!IsRectEmpty(&box) && PtInRect(&box, pt)) ||
+               (!IsRectEmpty(&label) && PtInRect(&label, pt));
+    };
+    if (hit(st->rDecoyBox, st->rDecoyLabel)) return 1;
+    if (hit(st->rKeepBox, st->rKeepLabel))   return 2;
+    if (hit(st->rMenuBox, st->rMenuLabel))   return 3;
+    for (int i = 0; i < 4; ++i) {
+        if (hit(st->rGenBox[i], st->rGenLabel[i])) return 4 + i;
+    }
+    if (!IsRectEmpty(&st->rUpdateBtn) && PtInRect(&st->rUpdateBtn, pt)) return 8;
+    if (!IsRectEmpty(&st->rSponsor) && PtInRect(&st->rSponsor, pt))     return 9;
+    return 0;
 }
 
 void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
@@ -1221,7 +1292,7 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
 
         RECT lr = row.labelRc;
         UiDrawTextLine(dc, row.label, lr, fBody, c.text,
-                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         // 分段控件容器
         UiDrawRoundRect(dc, row.segRc, UiPx(5), true, c.bgAlt, true, c.border);
@@ -1258,6 +1329,15 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
                            selected ? c.onAccent : c.text,
                            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
+
+        // 键盘焦点行：Tab / 上下键切换行时必须有可见反馈
+        //（原来 focusedRow 只写不画，键盘导航看起来像没反应）
+        // 只在"最近一次是键盘操作"时画：鼠标用户不需要焦点框
+        if (st->showFocusRing && (int)i == st->focusedRow) {
+            RECT fr = row.segRc;
+            InflateRect(&fr, UiPx(1), UiPx(1));
+            UiDrawRoundRect(dc, fr, UiPx(6), false, c.bg, true, c.accent);
+        }
     }
 
     if (st->hintVisible) {
@@ -1272,7 +1352,9 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
     // 「禁用诱饵文件」复选框（设置面板里唯一的复选框）
     if (!IsRectEmpty(&st->rDecoyBox)) {
         if (st->decoyDisabled) {
-            UiDrawRoundRect(dc, st->rDecoyBox, UiPx(4), true, c.accent, false, c.accent);
+            UiDrawRoundRect(dc, st->rDecoyBox, UiPx(4), true,
+                            st->hotItem == 1 ? UiBlend(c.accent, c.accentHover, 0.6f) : c.accent,
+                            false, c.accent);
             HFONT iconFont = UiIconFont(UiPx(11));
             if (iconFont) {
                 RECT gr = st->rDecoyBox;
@@ -1280,7 +1362,8 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
                                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
         } else {
-            UiDrawRoundRect(dc, st->rDecoyBox, UiPx(4), true, c.bgAlt, true, c.border);
+            UiDrawRoundRect(dc, st->rDecoyBox, UiPx(4), true, c.bgAlt, true,
+                            st->hotItem == 1 ? c.accent : c.border);
         }
         RECT lr = st->rDecoyLabel;
         UiDrawTextLine(dc, DecoyChkLabel(), lr, fBody, c.text,
@@ -1291,7 +1374,9 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
     // 「加密后保留源文件」复选框
     if (!IsRectEmpty(&st->rKeepBox)) {
         if (st->keepSource) {
-            UiDrawRoundRect(dc, st->rKeepBox, UiPx(4), true, c.accent, false, c.accent);
+            UiDrawRoundRect(dc, st->rKeepBox, UiPx(4), true,
+                            st->hotItem == 2 ? UiBlend(c.accent, c.accentHover, 0.6f) : c.accent,
+                            false, c.accent);
             HFONT iconFont = UiIconFont(UiPx(11));
             if (iconFont) {
                 RECT gr = st->rKeepBox;
@@ -1299,7 +1384,8 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
                                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
         } else {
-            UiDrawRoundRect(dc, st->rKeepBox, UiPx(4), true, c.bgAlt, true, c.border);
+            UiDrawRoundRect(dc, st->rKeepBox, UiPx(4), true, c.bgAlt, true,
+                            st->hotItem == 2 ? c.accent : c.border);
         }
         RECT lr = st->rKeepLabel;
         UiDrawTextLine(dc, KeepChkLabel(), lr, fBody, c.text,
@@ -1309,7 +1395,9 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
     // 「在资源管理器右键菜单中显示」复选框
     if (!IsRectEmpty(&st->rMenuBox)) {
         if (st->shellMenu) {
-            UiDrawRoundRect(dc, st->rMenuBox, UiPx(4), true, c.accent, false, c.accent);
+            UiDrawRoundRect(dc, st->rMenuBox, UiPx(4), true,
+                            st->hotItem == 3 ? UiBlend(c.accent, c.accentHover, 0.6f) : c.accent,
+                            false, c.accent);
             HFONT iconFont = UiIconFont(UiPx(11));
             if (iconFont) {
                 RECT gr = st->rMenuBox;
@@ -1317,7 +1405,8 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
                                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
         } else {
-            UiDrawRoundRect(dc, st->rMenuBox, UiPx(4), true, c.bgAlt, true, c.border);
+            UiDrawRoundRect(dc, st->rMenuBox, UiPx(4), true, c.bgAlt, true,
+                            st->hotItem == 3 ? c.accent : c.border);
         }
         RECT mr = st->rMenuLabel;
         UiDrawTextLine(dc, MenuChkLabel(), mr, fBody, c.text,
@@ -1330,7 +1419,10 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
         const bool on = (i == 0) ? st->genUpper : (i == 1) ? st->genLower
                        : (i == 2) ? st->genDigits : st->genSymbols;
         if (on) {
-            UiDrawRoundRect(dc, st->rGenBox[i], UiPx(4), true, c.accent, false, c.accent);
+            UiDrawRoundRect(dc, st->rGenBox[i], UiPx(4), true,
+                            st->hotItem == 4 + i ? UiBlend(c.accent, c.accentHover, 0.6f)
+                                                 : c.accent,
+                            false, c.accent);
             HFONT iconFont = UiIconFont(UiPx(11));
             if (iconFont) {
                 RECT gr = st->rGenBox[i];
@@ -1339,7 +1431,8 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
             }
         }
         else {
-            UiDrawRoundRect(dc, st->rGenBox[i], UiPx(4), true, c.bgAlt, true, c.border);
+            UiDrawRoundRect(dc, st->rGenBox[i], UiPx(4), true, c.bgAlt, true,
+                            st->hotItem == 4 + i ? c.accent : c.border);
         }
         RECT lr = st->rGenLabel[i];
         UiDrawTextLine(dc, GenClassLabel(i), lr, fBody, c.text,
@@ -1350,10 +1443,11 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
     if (!IsRectEmpty(&st->rGenLenLabel)) {
         RECT ll = st->rGenLenLabel;
         UiDrawTextLine(dc, GenLenLabel(), ll, fBody, c.text,
-                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         RECT well = st->rGenLenEdit;
         InflateRect(&well, UiPx(3), UiPx(3));
-        UiDrawRoundRect(dc, well, UiPx(5), true, c.bgAlt, true, c.border);
+        UiDrawRoundRect(dc, well, UiPx(5), true, c.bgAlt, true,
+                        st->focusedEdit == st->editGenLen ? c.accent : c.border);
         if (!st->genHintText.empty()) {
             const COLORREF hintColor = st->genLenError ? c.danger : WarningColor();
             UiDrawTextLine(dc, st->genHintText, st->rGenHint, fSmall, hintColor,
@@ -1363,7 +1457,8 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
 
     // 「检查更新」小胶囊
     if (!IsRectEmpty(&st->rUpdateBtn)) {
-        UiDrawRoundRect(dc, st->rUpdateBtn, UiPx(6), true, c.bgAlt, true, c.border);
+        UiDrawRoundRect(dc, st->rUpdateBtn, UiPx(6), true, c.bgAlt, true,
+                        st->hotItem == 8 ? c.accent : c.border);
         RECT ur = st->rUpdateBtn;
         UiDrawTextLine(dc, tr(L"⟳ 检查更新", L"⟳ Check for updates"), ur,
                        UiFont(UiPx(12), false), c.accent,
@@ -1372,10 +1467,11 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
 
     // 左下角「双击赞助」：不做成独立控件，直接自绘一个低调的小胶囊
     if (!IsRectEmpty(&st->rSponsor)) {
-        UiDrawRoundRect(dc, st->rSponsor, UiPx(6), true, c.bgAlt, true, c.border);
+        UiDrawRoundRect(dc, st->rSponsor, UiPx(6), true, c.bgAlt, true,
+                        st->hotItem == 9 ? c.accent : c.border);
         RECT sr = st->rSponsor;
         UiDrawTextLine(dc, tr(L"☕ 双击赞助", L"☕ Double-click to sponsor"), sr,
-                       UiFont(UiPx(12), false), c.textMuted,
+                       UiFont(UiPx(12), false), st->hotItem == 9 ? c.text : c.textMuted,
                        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
@@ -1411,8 +1507,21 @@ void PaintNormalDialog(HDC dc, UiDlgState* st, const RECT& rcClient) {
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     }
 
+    // 消息框里的「可选中复制」文本框：先画白框，真正的文字由 EDIT 自己绘制。
+    // 这一块原来错放在下面的 isPassword 分支里，而用到它的只有消息框，
+    // 所以文本框永远描不出圆角边框（只剩 EDIT 自己的方块底色）。
+    if (st->hasSelectable && !IsRectEmpty(&st->rSelectable)) {
+        RECT w = st->rSelectable;
+        InflateRect(&w, UiPx(1), UiPx(1));
+        UiDrawRoundRect(dc, w, UiPx(5), true, c.bgAlt, true,
+                        st->focusedEdit == st->editSelectable ? c.accent : c.border);
+    }
+
     if (st->isPassword) {
-        const COLORREF wellBorder = st->error.empty() ? c.border : c.danger;
+        // 只有“密码为空 / 两次不一致”这类密码错误才给输入框描红边；
+        // 保护设置（次数 / 天数）出错时密码本身没问题，红边会误导。
+        const COLORREF wellBorder = (!st->error.empty() && st->errorOnPassword)
+            ? c.danger : c.border;
         // 获得焦点的输入框用强调色描边，让用户一眼看出光标在哪个框里
         auto drawWell = [&](const RECT& r, bool visible, HWND edit) {
             if (!visible) return;
@@ -1422,13 +1531,6 @@ void PaintNormalDialog(HDC dc, UiDlgState* st, const RECT& rcClient) {
             UiDrawRoundRect(dc, w, UiPx(5), true, c.bgAlt, true,
                             focused ? c.accent : wellBorder);
         };
-        // 消息框里的只读文本框（画个底，真正的文字由 EDIT 自己绘制）
-        if (st->hasSelectable && !IsRectEmpty(&st->rSelectable)) {
-            RECT w = st->rSelectable;
-            InflateRect(&w, UiPx(1), UiPx(1));
-            UiDrawRoundRect(dc, w, UiPx(5), true, c.bgAlt, true, c.border);
-        }
-
         drawWell(st->rEdit1, st->edit1 != nullptr, st->edit1);
         drawWell(st->rEdit2, st->edit2 != nullptr && IsWindowVisible(st->edit2), st->edit2);
 
@@ -1537,6 +1639,25 @@ void PaintNormalDialog(HDC dc, UiDlgState* st, const RECT& rcClient) {
     if (st->isPassword && st->showDecoyOption)
         DrawHelpIcon(dc, st->rChkDecoyHelp);
 
+    // 「不再提示」复选框（消息框，父窗口自绘）
+    if (!IsRectEmpty(&st->rCheckBox)) {
+        if (st->checkValue) {
+            UiDrawRoundRect(dc, st->rCheckBox, UiPx(4), true, c.accent, false, c.accent);
+            HFONT iconFont = UiIconFont(UiPx(11));
+            if (iconFont) {
+                RECT gr = st->rCheckBox;
+                UiDrawTextLine(dc, L"\uE73E", gr, iconFont, c.onAccent,
+                               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+        else {
+            UiDrawRoundRect(dc, st->rCheckBox, UiPx(4), true, c.bgAlt, true, c.border);
+        }
+        RECT lr = st->rCheckLabel;
+        UiDrawTextLine(dc, st->checkText, lr, fBody, c.text,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
 }
 
 // 对话框统一入口：整帧先画到内存 DC，最后一次性贴上去，
@@ -1559,14 +1680,30 @@ void PaintDialog(HWND hwnd, UiDlgState* st) {
 
 // ---------------------------------------------------------------- 子类化
 
+static void RefreshFocusRings(UiDlgState* st);   // 前置声明（按钮子类化里会用到）
+
 LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                  UINT_PTR /*id*/, DWORD_PTR /*refData*/) {
     BtnExtra* ex = reinterpret_cast<BtnExtra*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
+    case WM_LBUTTONDOWN: {
+        // 点在按钮上是子控件收消息，父窗口收不到，所以这里也要退出键盘模式
+        HWND dlg = GetParent(hwnd);
+        UiDlgState* pst = dlg ? reinterpret_cast<UiDlgState*>(GetWindowLongPtrW(dlg, GWLP_USERDATA))
+                              : nullptr;
+        if (pst && pst->showFocusRing) {
+            pst->showFocusRing = false;
+            RefreshFocusRings(pst);
+        }
+        break;
+    }
+
     case WM_MOUSEMOVE:
         if (ex && !ex->hover) {
             ex->hover = true;
             EnsureDlgAnimation(GetParent(hwnd));   // 交给动画定时器渐变，不直接跳变
+            // 复选框不在按钮动画列表里，悬停要高亮就得自己重画一次
+            InvalidateRect(hwnd, NULL, FALSE);
             TRACKMOUSEEVENT tme = {};
             tme.cbSize = sizeof(tme);
             tme.dwFlags = TME_LEAVE;
@@ -1578,6 +1715,7 @@ LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         if (ex && ex->hover) {
             ex->hover = false;
             EnsureDlgAnimation(GetParent(hwnd));
+            InvalidateRect(hwnd, NULL, FALSE);
         }
         break;
     case WM_NCDESTROY:
@@ -1594,14 +1732,35 @@ LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 // 定义在文件后面（主题相关的编辑框样式）
 void ApplyEditTheme(HWND edit, const UiDlgState* st, bool mask = true);
 
-// 64 位十六进制的 sha256 一行放不下，按 32 字符折成两行
-static std::wstring WrapHash(const std::wstring& h) {
-    if (h.size() <= 32) return h;
-    return h.substr(0, 32) + L"\n" + h.substr(32);
-}
-
 // 检查更新：同步请求 Gitee API（几秒内返回），结果显示在消息框里。
 static void DoCheckUpdate(HWND hwnd, UiDlgState* st) {
+    if (!hwnd) hwnd = st ? st->hwnd : nullptr;
+
+    // Store 版本走的是微软自己的更新通道；用本程序的「原地替换」去覆盖它
+    // 可能出现权限/签名不一致的问题，所以先提醒一次（可勾选不再提示）。
+    if (Settings().updateWarnSkip == 0) {
+        bool skip = false;
+        UiMessage warn;
+        warn.icon = UiIcon::Warning;
+        warn.caption = tr(L"检查更新前请注意", L"Before checking for updates");
+        warn.text = tr(
+            L"如果您是通过 Microsoft Store 下载的本应用，请不要通过这种方式更新："
+            L"这可能会出现未知错误并损坏其他文件。",
+            L"If you installed this app from the Microsoft Store, please do not update this way: "
+            L"it may cause unexpected errors and corrupt other files.");
+        warn.buttons = MB_OKCANCEL;
+        warn.labels = { tr(L"确定", L"OK"), tr(L"返回", L"Back") };
+        warn.primaryId = IDOK;
+        warn.checkText = tr(L"不再提示", L"Don't show this again");
+        warn.checkInOut = &skip;
+        warn.topmost = true;
+        if (UiShowMessage(hwnd, warn) != IDOK) return;   // 返回：不检查
+        if (skip) {
+            Settings().updateWarnSkip = 1;
+            SettingsSave();
+        }
+    }
+
     const HCURSOR oldCur = SetCursor(LoadCursorW(NULL, IDC_WAIT));
     UpdateCheckSetEnglish(g_langEnglish);   // 错误信息跟随界面语言
     UpdateCheckResult r = CheckForUpdate();
@@ -1859,7 +2018,6 @@ void TickDialogAnimation(HWND hDlg, UiDlgState* st) {
 // 这样无论跨几个选项耗时都一样；之前每帧走固定步长，距离越远拖得越久。
 void TickSettingsSlide(HWND hDlg, UiDlgState* st, float /*dt*/, bool& active) {
     const ULONGLONG now = GetTickCount64();
-    bool moving = false;
     for (auto& row : st->rows) {
         if (!row.animActive) continue;
         const float t = (float)(now - row.animStart) / 1000.0f / UI_SLIDE_DURATION;
@@ -1876,9 +2034,7 @@ void TickSettingsSlide(HWND hDlg, UiDlgState* st, float /*dt*/, bool& active) {
         RECT r = row.segRc;
         InflateRect(&r, UiPx(2), UiPx(2));
         InvalidateRect(hDlg, &r, FALSE);
-        moving = true;
     }
-    (void)moving;
 }
 
 // ---- 设置对话框辅助 ----
@@ -1942,6 +2098,7 @@ void RelayoutDialog(HWND hDlg, UiDlgState* st) {
     // 全部改完之后再一次性重画，只擦一帧。
     SetWindowPos(hDlg, NULL, cx - st->winW / 2, cy - st->winH / 2, st->winW, st->winH,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+    st->hotItem = 0;   // 布局变了，之前记下的悬停目标可能已经指向别的控件
     PositionPasswordControls(st, /*noRedraw=*/true);
     PositionButtons(st);
     RedrawWindow(hDlg, NULL, NULL,
@@ -1969,8 +2126,20 @@ void SyncProtectionEnabled(UiDlgState* st) {
     if (st->editDays)  EnableWindow(st->editDays, on);
 }
 
+// 重画所有按钮，让焦点环的出现/消失立即生效
+static void RefreshFocusRings(UiDlgState* st) {
+    if (!st) return;
+    for (HWND b : st->btns) {
+        if (b && IsWindow(b)) InvalidateRect(b, NULL, FALSE);
+    }
+}
+
 // 自绘窗口没有对话框管理器，Tab 焦点切换需要自己实现
 void CycleFocus(UiDlgState* st, bool backwards) {
+    if (st && !st->showFocusRing) {
+        st->showFocusRing = true;   // 键盘操作：显示焦点环
+        RefreshFocusRings(st);
+    }
     std::vector<HWND> order;
     for (HWND h : st->tabOrder) {
         if (h && IsWindow(h) && IsWindowVisible(h) && IsWindowEnabled(h)) order.push_back(h);
@@ -2097,11 +2266,12 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // 消息框：可选中复制的只读文本框
         if (st->hasSelectable && !IsRectEmpty(&st->rSelectable)) {
-            const RECT& sr = st->rSelectable;
+            const RECT& sr = IsRectEmpty(&st->rSelectableInner) ? st->rSelectable
+                                                                : st->rSelectableInner;
             st->editSelectable = CreateWindowExW(0, L"EDIT", st->selectableText.c_str(),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL,
-                sr.left + UiPx(8), sr.top + UiPx(6),
-                sr.right - sr.left - UiPx(16), sr.bottom - sr.top - UiPx(12),
+                sr.left + UiPx(8), sr.top,
+                sr.right - sr.left - UiPx(16), sr.bottom - sr.top,
                 hwnd, (HMENU)(INT_PTR)IDC_SELECTABLE, inst, NULL);
             if (st->editSelectable) {
                 SendMessageW(st->editSelectable, WM_SETFONT, (WPARAM)UiFont(UiPx(14), false), TRUE);
@@ -2145,11 +2315,16 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         PositionPasswordControls(st);
         PositionButtons(st);
 
-        // Tab 顺序：输入框 -> 复选框 -> 按钮
+        // Tab 顺序：输入框 -> 复选框 -> 按钮。保护区的控件和只读密码框
+        // 原来没进列表，Tab 永远走不到（键盘用户没法开/关防暴力破解）。
         if (st->edit1) st->tabOrder.push_back(st->edit1);
         if (st->confirm && st->edit2) st->tabOrder.push_back(st->edit2);
         if (st->chkShow) st->tabOrder.push_back(st->chkShow);
         if (st->chkDecoy) st->tabOrder.push_back(st->chkDecoy);
+        if (st->chkProt) st->tabOrder.push_back(st->chkProt);
+        if (st->editTries) st->tabOrder.push_back(st->editTries);
+        if (st->editDays) st->tabOrder.push_back(st->editDays);
+        if (st->editSelectable) st->tabOrder.push_back(st->editSelectable);
         for (HWND b : st->btns) if (b) st->tabOrder.push_back(b);
 
         UiApplyFrame(hwnd, true, true);
@@ -2167,19 +2342,39 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const RECT* rc = HelpIconRect(st);
         if (rc && !IsRectEmpty(rc) && PtInRect(rc, pt)) {
             SetHelpTipVisible(st, true);
-            TRACKMOUSEEVENT tme = {};
-            tme.cbSize = sizeof(tme);
-            tme.dwFlags = TME_LEAVE;
-            tme.hwndTrack = hwnd;
-            TrackMouseEvent(&tme);
         } else {
             SetHelpTipVisible(st, false);
         }
+        // 设置面板的自绘元素（复选框/胶囊）需要父窗口自己跟踪悬停：
+        // 只在悬停目标变化时整窗重画，避免鼠标每动一下都重画。
+        if (!IsRectEmpty(&st->rCheckBox) &&
+            (PtInRect(&st->rCheckBox, pt) || PtInRect(&st->rCheckLabel, pt)))
+            return HTCLIENT;
+        if (st->isSettings) {
+            const int hot = SettingsHotItem(st, pt);
+            if (hot != st->hotItem) {
+                st->hotItem = hot;
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
+        // 无论是否停在「?」上都要注册 TME_LEAVE，否则鼠标移出窗口时收不到
+        // WM_MOUSELEAVE，悬停高亮会一直留着。
+        TRACKMOUSEEVENT tme = {};
+        tme.cbSize = sizeof(tme);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
         break;
     }
 
     case WM_MOUSELEAVE:
-        if (st) SetHelpTipVisible(st, false);
+        if (st) {
+            SetHelpTipVisible(st, false);
+            if (st->hotItem != 0) {
+                st->hotItem = 0;
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
         break;
 
     case WM_PAINT:
@@ -2276,7 +2471,18 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_LBUTTONDOWN: {
         if (!st || st->closing) break;   // 关闭淡出期间不再响应输入
+        if (st->showFocusRing) {         // 鼠标操作：不再显示焦点环
+            st->showFocusRing = false;
+            RefreshFocusRings(st);
+        }
         const POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
+        // 「不再提示」复选框：点方块或文字都切换
+        if (!IsRectEmpty(&st->rCheckBox) &&
+            (PtInRect(&st->rCheckBox, pt) || PtInRect(&st->rCheckLabel, pt))) {
+            st->checkValue = !st->checkValue;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
 
         // 密码框右侧的「随机生成」（自绘按钮，走这里而不是 WM_COMMAND）
         if (st->showGenButton && !IsRectEmpty(&st->rGenBtn) && PtInRect(&st->rGenBtn, pt)) {
@@ -2361,8 +2567,9 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (st->edit1 && PtInRect(&st->rEdit1, pt)) { SetFocus(st->edit1); return 0; }
             if (st->confirm && st->edit2 && PtInRect(&st->rEdit2, pt)) { SetFocus(st->edit2); return 0; }
 
-            // 保护区的“永久删除文件 / 禁止解密”分段控件：点一下即切换
-            if (st->showProtection && PtInRect(&st->rSeg, pt)) {
+            // 保护区的“永久删除文件 / 禁止解密”分段控件：点一下即切换。
+            // 复选框没勾时整块是禁用态（文字已置灰），不能还能点动。
+            if (st->showProtection && st->prot.enabled && PtInRect(&st->rSeg, pt)) {
                 for (size_t k = 0; k < st->protItemRc.size(); ++k) {
                     if (!PtInRect(&st->protItemRc[k], pt)) continue;
                     if (st->prot.action != (int)k) {
@@ -2406,25 +2613,16 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        // 「安全删除覆写次数」：边输边校验，提示实时更新
-        if (id == IDC_UI_PASSES && code == EN_CHANGE) {
-            ValidatePasses(st);
-            InvalidateRect(hwnd, NULL, FALSE);
-            return 0;
-        }
-
-        if (id == IDC_UI_CHK_DECOY) {
+        // 只把 BN_CLICKED 当作“点击”。这些自绘按钮没加 BS_NOTIFY，所以
+        // Windows 不会发 BN_SETFOCUS/BN_KILLFOCUS；显式判断通知码是为了让
+        // “激活”的语义明确，将来谁加了 BS_NOTIFY 也不会把焦点切换当成点击。
+        if (id == IDC_UI_CHK_DECOY && code == BN_CLICKED) {
             st->useDecoy = !st->useDecoy;
             if (st->chkDecoy) {
                 SendMessageW(st->chkDecoy, BM_SETCHECK,
                              st->useDecoy ? BST_CHECKED : BST_UNCHECKED, 0);
                 InvalidateRect(st->chkDecoy, NULL, FALSE);
             }
-            return 0;
-        }
-
-        if (id == IDC_GEN_PWD) {
-            DoGeneratePassword(hwnd, st);
             return 0;
         }
 
@@ -2451,7 +2649,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        if (id == IDC_UI_SHOW) {
+        if (id == IDC_UI_SHOW && code == BN_CLICKED) {
             st->showPwd = !st->showPwd;
             // ApplyEditTheme 内部会重新写入文本以强制编辑控件立刻重绘
             ApplyEditTheme(st->edit1, st);
@@ -2460,7 +2658,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        if (id == IDC_UI_CHK_PROT) {
+        if (id == IDC_UI_CHK_PROT && code == BN_CLICKED) {
             st->prot.enabled = !st->prot.enabled;
             if (st->chkProt) {
                 SendMessageW(st->chkProt, BM_SETCHECK, st->prot.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -2471,7 +2669,8 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        if (id == IDOK || id == IDCANCEL || id == IDYES || id == IDNO) {
+        if (code == BN_CLICKED &&
+            (id == IDOK || id == IDCANCEL || id == IDYES || id == IDNO)) {
 
             if (st->isPassword && id == IDOK) {
                 wchar_t buf1[256] = {};
@@ -2486,6 +2685,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 if (buf1[0] == L'\0') {
                     st->error = tr(L"密码不能为空！", L"Password cannot be empty!");
+                    st->errorOnPassword = true;
                     MessageBeep(MB_ICONWARNING);
                     InvalidateRect(hwnd, NULL, FALSE);
                     if (st->edit1) SetFocus(st->edit1);
@@ -2493,6 +2693,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 if (wcscmp(buf1, buf2) != 0) {
                     st->error = tr(L"两次输入的密码不一致！", L"Passwords do not match!");
+                    st->errorOnPassword = true;
                     MessageBeep(MB_ICONWARNING);
                     InvalidateRect(hwnd, NULL, FALSE);
                     if (st->edit2) SetFocus(st->edit2);
@@ -2521,6 +2722,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     int tries = 0;
                     if (!parseNum(tb, tries) || tries < 1 || tries > 9999) {
                         st->error = tr(L"错误尝试次数需为 1-9999 的整数", L"Attempts must be an integer from 1 to 9999");
+                        st->errorOnPassword = false;   // 保护设置的问题，别把密码框描红
                         MessageBeep(MB_ICONWARNING);
                         InvalidateRect(hwnd, NULL, FALSE);
                         if (st->editTries) SetFocus(st->editTries);
@@ -2532,6 +2734,7 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         int days = 0;
                         if (!parseNum(db, days) || days < 0 || days > 3650) {
                             st->error = tr(L"锁定时长需为 0-3650 的整数", L"Lock days must be an integer from 0 to 3650");
+                            st->errorOnPassword = false;   // 同上：与密码本身无关
                             MessageBeep(MB_ICONWARNING);
                             InvalidateRect(hwnd, NULL, FALSE);
                             if (st->editDays) SetFocus(st->editDays);
@@ -2757,6 +2960,8 @@ int RunDialog(HWND owner, UiDlgState* st) {
     BringWindowToTop(hwnd);
 
     if (st->edit1) SetFocus(st->edit1);
+    // 随机密码消息框：焦点直接给只读文本框，打开就能 Ctrl+C 复制
+    else if (st->editSelectable) SetFocus(st->editSelectable);
     else if (!st->btns.empty() && st->btns.front()) SetFocus(st->btns.front());
 
     EnsureDlgAnimation(hwnd);   // 启动淡入
@@ -2770,6 +2975,15 @@ int RunDialog(HWND owner, UiDlgState* st) {
 
         // 自绘窗口没有对话框管理器，回车/Esc/Tab 需显式处理
         if (msg.message == WM_KEYDOWN) {
+            // 焦点在输入框里时，方向键应该移动文本光标，不能被设置面板的行导航截走
+            bool focusInEdit = false;
+            {
+                HWND f = GetFocus();
+                wchar_t cls[16] = {};
+                if (f && GetClassNameW(f, cls, _countof(cls)) > 0 &&
+                    wcscmp(cls, L"Edit") == 0)
+                    focusInEdit = true;
+            }
             if (msg.wParam == VK_RETURN) {
                 SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(st->primaryId, BN_CLICKED), 0);
                 continue;
@@ -2793,7 +3007,8 @@ int RunDialog(HWND owner, UiDlgState* st) {
                 }
                 continue;
             }
-            if (st->isSettings && (msg.wParam == VK_DOWN || msg.wParam == VK_UP)) {
+            if (st->isSettings && !focusInEdit &&
+                (msg.wParam == VK_DOWN || msg.wParam == VK_UP)) {
                 const int n = (int)st->rows.size();
                 if (n > 0) {
                     const int d = (msg.wParam == VK_UP) ? -1 : 1;
@@ -2802,7 +3017,8 @@ int RunDialog(HWND owner, UiDlgState* st) {
                 }
                 continue;
             }
-            if (st->isSettings && (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT)) {
+            if (st->isSettings && !focusInEdit &&
+                (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT)) {
                 const int n = (int)st->rows.size();
                 if (n > 0 && st->focusedRow >= 0 && st->focusedRow < n) {
                     auto& row = st->rows[st->focusedRow];
@@ -2857,6 +3073,8 @@ int UiShowMessage(HWND owner, const UiMessage& m) {
     st.btnLabels = m.labels;
     st.selectableText = m.selectable;
     st.hasSelectable  = !m.selectable.empty();
+    st.checkText  = m.checkText;
+    st.checkValue = (m.checkInOut && *m.checkInOut);
 
     switch (m.buttons & 0x0F) {
     case MB_YESNO:
@@ -2885,6 +3103,8 @@ int UiShowMessage(HWND owner, const UiMessage& m) {
     if (m.primaryId) st.primaryId = m.primaryId;
 
     const int r = RunDialog(owner, &st);
+    // 复选框是父窗口自绘的，勾选状态要回填给调用方
+    if (m.checkInOut) *m.checkInOut = st.checkValue;
     if ((m.buttons & 0x0F) == MB_OK && r == 0) return IDOK;
     return r;
 }

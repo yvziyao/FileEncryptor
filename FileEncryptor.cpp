@@ -5,12 +5,9 @@
 #include <commdlg.h>
 #include <shobjidl.h>
 #include <shellapi.h>
-#include <iostream>
-#include <fstream>
 #include <vector>
 #include <string>
 #include <cstdint>
-#include <memory>
 #include <cstring>
 #include <algorithm>
 #include <ctime>
@@ -71,17 +68,19 @@ HWND g_mainWnd = NULL;
 bool g_langEnglish = false; // false = 中文, true = English
 void UpdateLanguageUI();
 
-// 底部状态文本（自绘，以支持深色模式）
-std::wstring g_statusText;
-// 进度条上方显示的当前文件名（只有文件名，不含路径）
+// 进度条上方显示的信息：文件名（只有名字，放不下时省略号）与完整路径（tooltip 用）
 static std::wstring g_progFileName;
+static std::wstring g_progFilePath;
+// 长文件名的 tooltip（TTF_TRACK 手工控制显示/隐藏，见 UpdateFileNameTooltip）
+static HWND g_tipWnd = NULL;
+static bool g_tipActive = false;
+static std::wstring g_tipText;
 // 任务队列计数：已完成 / 总数
 static std::atomic<int> g_tasksDone(0);      // 已完成
 static std::atomic<int> g_taskRunning(0);    // 1 = 有任务正在执行（这部分原先没被计进总数）
 
 
 // 自定义消息
-#define WM_APP_SET_STATUS    (WM_APP + 1)
 #define WM_APP_SHOW_PROGRESS (WM_APP + 2)
 #define WM_APP_UPDATE_PROGRESS (WM_APP + 3)
 #define WM_APP_SHOW_MESSAGE  (WM_APP + 4)
@@ -119,6 +118,9 @@ static void ProgressSetFile(uint64_t doneBytes);
 static void ProgressEndFile();
 static void ProgressFinish();
 static void CollectFilesRecursive(const std::wstring& path, std::vector<std::wstring>& out);
+// 主窗口布局/tooltip 辅助（定义在窗口布局一节）
+static std::wstring FileNameOf(const std::wstring& p);
+static void HideFileNameTooltip();
 // ---------- 系统托盘 ----------
 // 窗口隐藏到后台时用户完全看不到任务状态，所以放一个托盘图标：
 // 悬停显示当前进度，左键恢复窗口，右键可显示/退出。
@@ -192,7 +194,6 @@ static void StartProcessing(std::vector<std::wstring> files,
                             std::string  decoyPwd = std::string());
 static void ShowUiMessage(HWND owner, UiIcon icon, const std::wstring& caption,
                           const std::wstring& text, bool topmost);
-static void ApplyProgressBarTheme();
 static void ShowSettingsDialog(HWND owner);
 static LRESULT HandleAskOutputPath(HWND hWnd, LPARAM lParam);
 static std::wstring PasswordSubtitle(const std::wstring& file, size_t index, size_t total);
@@ -374,15 +375,6 @@ static std::wstring narrow_to_wstring(const std::string& s) {
     }
     // 回退到 ANSI
     return ansi_to_wstring(s);
-}
-
-static std::string wstring_to_utf8(const std::wstring& w) {
-    if (w.empty()) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), NULL, 0, NULL, NULL);
-    if (len == 0) return {};
-    std::string s; s.resize(len);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], len, NULL, NULL);
-    return s;
 }
 
 // ---------- 密码对话框 ----------
@@ -737,17 +729,6 @@ static std::vector<std::wstring> PickFilesMulti(HWND owner) {
     return out;
 }
 
-// 状态文本由主窗口自绘（见 WM_PAINT），以便跟随深浅色主题
-void SetStatusText(const std::wstring& text) {
-    g_statusText = text;
-    if (g_mainWnd) {
-        RECT rc;
-        GetClientRect(g_mainWnd, &rc);
-        RECT strip = { 0, rc.bottom - UiPx(30), rc.right, rc.bottom };
-        InvalidateRect(g_mainWnd, &strip, FALSE);
-    }
-}
-
 static void ShowProgressBar(bool show) {
     if (g_mainWnd) {
         PostMessageW(g_mainWnd, WM_APP_SHOW_PROGRESS, show ? 1 : 0, 0);
@@ -962,20 +943,24 @@ public:
     }
 
     HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
-        const bool has = DropHasFiles(data);
-        SetDropOnDelete(has);
-        if (effect) *effect = has ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        hasFiles_ = DropHasFiles(data);
+        SetDropOnDelete(hasFiles_);
+        if (effect) *effect = hasFiles_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* effect) override {
-        if (effect) *effect = DROPEFFECT_COPY;
+        // 之前这里无条件返回 COPY：即使拖的是文字/网页链接，光标也显示可放下，
+        // 而 DragEnter 已经判定 NONE。保持一致才能让用户看懂“能不能松手”。
+        if (effect) *effect = hasFiles_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE DragLeave() override {
+        hasFiles_ = false;
         SetDropOnDelete(false);
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
+        hasFiles_ = false;
         SetDropOnDelete(false);
         if (effect) *effect = DROPEFFECT_COPY;
 
@@ -994,6 +979,7 @@ public:
 private:
     LONG ref_ = 1;
     HWND owner_ = nullptr;
+    bool hasFiles_ = false;   // 本次拖拽是否真的带了文件（决定 DragOver 的鼠标效果）
 };
 
 // 全局持有：Release 时自删，这里存裸指针即可
@@ -1009,11 +995,28 @@ static void RegisterDeleteDropTarget(HWND owner, HWND btn) {
     }
 }
 
+// 键盘焦点在四个自绘按钮之间循环（定义见「键盘可达」一节）
+static void MoveMainFocus(int fromId, bool backwards);
+
+// 焦点环只在"用键盘操作"时显示：鼠标点过按钮之后就隐藏。
+// 这是 Windows 自己的按键提示（UISF_HIDEFOCUS）惯例——鼠标用户不需要看到焦点框。
+bool g_showFocusRing = false;
+
+static void SetFocusRingFromKeyboard(bool fromKeyboard) {
+    if (g_showFocusRing == fromKeyboard) return;
+    g_showFocusRing = fromKeyboard;
+    if (g_hBtn1) InvalidateRect(g_hBtn1, NULL, FALSE);
+    if (g_hBtn2) InvalidateRect(g_hBtn2, NULL, FALSE);
+    if (g_hBtn3) InvalidateRect(g_hBtn3, NULL, FALSE);
+}
+
 static LRESULT CALLBACK MainBtnSubclassProc(HWND h, UINT msg, WPARAM wParam, LPARAM lParam,
                                             UINT_PTR id, DWORD_PTR) {
     const int ctl = (int)id;
     switch (msg) {
     case WM_MOUSEMOVE:
+        // 鼠标移到按钮上时把文件名的 tooltip 收起来，避免它悬在原地不消失
+        HideFileNameTooltip();
         if (ctl >= 0 && ctl < 8 && !g_hoverBtn[ctl]) {
             g_hoverBtn[ctl] = true;
             StartAnimation();
@@ -1029,67 +1032,224 @@ static LRESULT CALLBACK MainBtnSubclassProc(HWND h, UINT msg, WPARAM wParam, LPA
             StartAnimation();
         }
         break;
+    case WM_LBUTTONDOWN:
+        SetFocusRingFromKeyboard(false);   // 鼠标操作：不再显示焦点环
+        break;
+    case WM_KEYDOWN:
+        SetFocusRingFromKeyboard(true);   // 键盘操作：显示焦点环
+        // 主窗口不是对话框，没有对话框管理器帮忙分发 Tab，这里自己处理：
+        // Tab / Shift+Tab 循环焦点，Enter 触发当前按钮（空格由 BUTTON 控件自己处理）。
+        if (wParam == VK_TAB) {
+            MoveMainFocus(ctl, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+            return 0;
+        }
+        if (wParam == VK_RETURN) {
+            SendMessageW(h, BM_CLICK, 0, 0);
+            return 0;
+        }
+        break;
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+        // 焦点变化要重绘才能画出/擦掉焦点环
+        InvalidateRect(h, NULL, FALSE);
+        break;
     default:
         break;
     }
     return DefSubclassProc(h, msg, wParam, lParam);
 }
 
-// 主按钮宽度：按当前语言文字实测，只留较小的内边距，让主界面更紧凑
+// 主按钮宽度：按当前语言文字实测，只留较小的内边距，让主界面更紧凑。
+// 关键：测量用的字重/抗锯齿必须与真正绘制时完全一致，否则算出来的宽度会偏小。
 static int MainButtonWidth() {
     HDC dc = GetDC(NULL);
     if (!dc) return UiPx(112);
-    HFONT font = UiFont(UiPx(15), false, true);   // 与按钮文字同一字体（灰度抗锯齿）
-    HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
 
-    auto measure = [&](const std::wstring& s) {
+    auto measure = [&](const std::wstring& s, bool semibold) {
+        HFONT font = UiFont(UiPx(15), semibold, true);
+        HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
         RECT r = { 0, 0, 0, 0 };
         DrawTextW(dc, s.c_str(), (int)s.size(), &r, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        if (old) SelectObject(dc, old);
         return r.right - r.left;
     };
-    int textW = measure(tr(L"加密文件", L"Encrypt file"));
-    const int w2 = measure(tr(L"解密文件", L"Decrypt file"));
+    int textW = measure(tr(L"加密文件", L"Encrypt file"), false);
+    const int w2 = measure(tr(L"解密文件", L"Decrypt file"), false);
     if (w2 > textW) textW = w2;
     // 安全删除按钮的文案更长（"松开删除" 也要放得下），一并计入
-    const int w3 = measure(tr(L"安全删除", L"Secure delete"));
+    const int w3 = measure(tr(L"安全删除", L"Secure delete"), false);
     if (w3 > textW) textW = w3;
-    const int w3b = measure(tr(L"松开删除", L"Release to delete"));
+    const int w3b = measure(tr(L"松开删除", L"Release to delete"), false);
     if (w3b > textW) textW = w3b;
 
-    if (old) SelectObject(dc, old);
     ReleaseDC(NULL, dc);
 
     const int bw = textW + UiPx(52);   // 左右各 26px 内边距
     return bw > UiPx(108) ? bw : UiPx(108);
 }
 
+// 主窗口网格：边距/间距统一取 4 的倍数（4/8/12/16/24）。
+// 三个主按钮组、进度条三行、右上角设置按钮都以 kMainSideMargin 为左右基准，
+// 这样它们的边缘能对齐在同一列竖线上。
+// 窗口宽度固定 = 按钮组宽 + 两侧留白（窗口不可拉伸，见 WinMain 的窗口样式）。
+static const int kMainSideMargin = 24;   // 96dpi 设计值：窗口左右留白
+static const int kMainBtnGap     = 16;   // 三个主按钮之间的水平间距
+static const int kMainBtnH       = 44;   // 主按钮高度
+static const int kMainRowHeight  = 18;   // 进度区每行（文件名/进度条/信息）高度
+static const int kMainRowGap     = 8;    // 进度区行间距
+static const int kMainTopMargin  = 12;   // 设置按钮上边距
+static const int kMainSettingW   = 40;   // 设置按钮宽
+static const int kMainSettingH   = 28;   // 设置按钮高
+// 主按钮在设置按钮下方另起一行：12 + 28 + 8 = 48
+static const int kMainBtnY       = kMainTopMargin + kMainSettingH + 8;
+
 static int MainClientWidth() {
     // 三个按钮并排 + 两个间距 + 左右留白
-    return MainButtonWidth() * 3 + UiPx(16) * 2 + UiPx(2 * 28);
+    return MainButtonWidth() * 3 + UiPx(kMainBtnGap) * 2 + UiPx(2 * kMainSideMargin);
 }
 
-// 顶部第一行留给右上角的设置按钮，主按钮放在它下方，两者不重叠
-static const int kMainBtnY = 46;    // 96dpi 设计值
+// 进度区顶边：主按钮下方 16px
+static int ProgressRectTop() { return UiPx(kMainBtnY) + UiPx(kMainBtnH) + UiPx(16); }
 
-// 进度条的绘制位置（主窗口客户区坐标）；WM_PAINT 与布局共用，避免两处算不一致
-static int ProgressRectTop() { return UiPx(kMainBtnY) + UiPx(44) + UiPx(16); }
-
-static int MainClientHeight(bool busy) {
-    const int btnY = UiPx(kMainBtnY);
-    const int btnH = UiPx(44);
-    if (!busy) return btnY + btnH + UiPx(20);   // 已去掉底部状态栏
-
-    // 工作中：文件名行 + 进度条 + 下方“进度 / 预计剩余时间（左）+ 队列计数（右）”
-    return ProgressRectTop() + UiPx(18) + UiPx(6) + UiPx(18) + UiPx(6) + UiPx(18) + UiPx(16);
-}
-
-// 三行：文件名（进度条上方）、进度条、信息行（下方）
+// 三行：文件名（进度条上方）、进度条、信息行（下方）。
+// WM_PAINT 与布局共用；左右内边距与按钮组一致，避免进度条比按钮组宽出一截。
 static void ProgressRects(const RECT& rc, RECT& file, RECT& bar, RECT& info) {
-    const int pad = UiPx(24);
+    const int pad = UiPx(kMainSideMargin);
     const int top = ProgressRectTop();
-    file = { pad, top, rc.right - pad, top + UiPx(18) };
-    bar  = { pad, file.bottom + UiPx(6), rc.right - pad, file.bottom + UiPx(6) + UiPx(18) };
-    info = { pad, bar.bottom + UiPx(6), rc.right - pad, bar.bottom + UiPx(6) + UiPx(18) };
+    file = { pad, top, rc.right - pad, top + UiPx(kMainRowHeight) };
+    bar  = { pad, file.bottom + UiPx(kMainRowGap), rc.right - pad,
+             file.bottom + UiPx(kMainRowGap) + UiPx(kMainRowHeight) };
+    info = { pad, bar.bottom + UiPx(kMainRowGap), rc.right - pad,
+             bar.bottom + UiPx(kMainRowGap) + UiPx(kMainRowHeight) };
+}
+
+// 高度由 ProgressRects 反推：之前 MainClientHeight 自己把 18/6/16 抄了一遍，
+// 改进度区布局时很容易只改一处、导致底部多出或少掉一条空白。
+static int MainClientHeight(bool busy) {
+    if (!busy) return UiPx(kMainBtnY) + UiPx(kMainBtnH) + UiPx(kMainSideMargin);
+    RECT rc = { 0, 0, 0, 0 };
+    RECT file = {}, bar = {}, info = {};
+    ProgressRects(rc, file, bar, info);
+    return info.bottom + UiPx(kMainSideMargin);
+}
+
+// 摆放子控件；位置尺寸都没变时直接跳过 SetWindowPos。
+// 窗口高度动画期间每帧都会收到 WM_SIZE，若每次都无条件重摆一次，
+// 四颗按钮会跟着白重绘十几帧（动画本来就慢，越卡越明显）。
+static void PlaceChild(HWND parent, HWND child, int x, int y, int w, int h) {
+    if (!child) return;
+    POINT pt = { x, y };
+    ClientToScreen(parent, &pt);
+    RECT cur = {};
+    if (GetWindowRect(child, &cur) &&
+        cur.left == pt.x && cur.top == pt.y &&
+        cur.right - cur.left == w && cur.bottom - cur.top == h) {
+        return;
+    }
+    SetWindowPos(child, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+// 把三个主按钮与右上角设置按钮摆到当前客户区宽度对应的位置。
+// WM_CREATE 与 WM_SIZE 共用：创建时就用按 DPI 缩放后的坐标，否则会先用
+// 未缩放的占位坐标摆一遍再被 WM_SIZE 纠正（120/144 DPI 下能看到位置跳动）。
+static void LayoutMainControls(HWND hWnd) {
+    if (!hWnd) return;
+    RECT rc;
+    GetClientRect(hWnd, &rc);
+
+    const int btnW = MainButtonWidth();
+    const int btnH = UiPx(kMainBtnH);
+    const int gap = UiPx(kMainBtnGap);
+    const int btnY = UiPx(kMainBtnY);
+    int btnX = (rc.right - (btnW * 3 + gap * 2)) / 2;
+    if (btnX < UiPx(kMainTopMargin)) btnX = UiPx(kMainTopMargin);
+
+    PlaceChild(hWnd, g_hBtn1, btnX, btnY, btnW, btnH);
+    PlaceChild(hWnd, g_hBtn2, btnX + btnW + gap, btnY, btnW, btnH);
+    PlaceChild(hWnd, g_hBtn3, btnX + (btnW + gap) * 2, btnY, btnW, btnH);
+    PlaceChild(hWnd, g_hLangBtn,
+               rc.right - UiPx(kMainTopMargin) - UiPx(kMainSettingW), UiPx(kMainTopMargin),
+               UiPx(kMainSettingW), UiPx(kMainSettingH));
+}
+
+// 主题/字体切换后让所有自绘控件整体重绘。
+// 之前这里漏了 g_hBtn3：切主题后「安全删除」按钮会残留旧配色，直到鼠标扫过才更新。
+static void InvalidateMainControls() {
+    if (!g_mainWnd) return;
+    InvalidateRect(g_mainWnd, NULL, FALSE);
+    HWND buttons[] = { g_hBtn1, g_hBtn2, g_hBtn3, g_hLangBtn };
+    for (HWND h : buttons) {
+        if (h) InvalidateRect(h, NULL, FALSE);
+    }
+}
+
+// ---------- 键盘可达 ----------
+// 主窗口不是对话框，没有对话框管理器来分发 Tab，所以这里手工在四个按钮之间
+// 移动焦点；Enter 直接触发当前按钮（空格由 BUTTON 控件自己处理）。
+static const int kMainBtnOrder[] = { 1, 2, 3, 5 };
+
+static HWND MainButtonById(int id) {
+    switch (id) {
+    case 1: return g_hBtn1;
+    case 2: return g_hBtn2;
+    case 3: return g_hBtn3;
+    case 5: return g_hLangBtn;
+    default: return NULL;
+    }
+}
+
+static void MoveMainFocus(int fromId, bool backwards) {
+    const int n = (int)(sizeof(kMainBtnOrder) / sizeof(kMainBtnOrder[0]));
+    int idx = 0;
+    for (int i = 0; i < n; ++i) {
+        if (kMainBtnOrder[i] == fromId) { idx = i; break; }
+    }
+    const int next = backwards ? (idx + n - 1) % n : (idx + 1) % n;
+    if (HWND target = MainButtonById(kMainBtnOrder[next])) SetFocus(target);
+}
+
+// ---------- 长文件名 tooltip ----------
+// 进度条上方只放文件名（含路径会显示不全，超长时省略号截断）。
+// 悬停时用 tooltip 显示完整路径，避免同名文件分不清正在处理哪一个。
+static void HideFileNameTooltip() {
+    if (!g_tipActive) return;
+    g_tipActive = false;
+    if (g_tipWnd) SendMessageW(g_tipWnd, TTM_TRACKACTIVATE, FALSE, 0);
+}
+
+static void UpdateFileNameTooltip(HWND hWnd, int x, int y) {
+    if (!g_tipWnd || !g_progVisible || g_progFilePath.empty()) {
+        HideFileNameTooltip();
+        return;
+    }
+
+    RECT rc, fileRc = {}, bar = {}, info = {};
+    GetClientRect(hWnd, &rc);
+    ProgressRects(rc, fileRc, bar, info);
+    POINT pt = { x, y };
+    if (!PtInRect(&fileRc, pt)) {
+        HideFileNameTooltip();
+        return;
+    }
+
+    g_tipText = g_progFilePath;
+    TOOLINFOW ti = {};
+    ti.cbSize = sizeof(ti);
+    ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+    ti.hwnd = hWnd;
+    ti.uId = 1;
+    ti.lpszText = g_tipText.data();
+    SendMessageW(g_tipWnd, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+
+    POINT sp = pt;
+    ClientToScreen(hWnd, &sp);
+    sp.x += UiPx(12);
+    sp.y += UiPx(20);   // 放在鼠标下方，避免盖住正在看的文件名
+    SendMessageW(g_tipWnd, TTM_TRACKPOSITION, 0, MAKELPARAM(sp.x, sp.y));
+    if (!g_tipActive) {
+        g_tipActive = true;
+        SendMessageW(g_tipWnd, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+    }
 }
 
 // 进度条填充色：浅色主题用 Windows 那种较深的绿，深色主题用亮一点的绿
@@ -1142,6 +1302,11 @@ static void ApplyMainWindowWidth() {
 // ---------- 动画 ----------
 // 一个 15ms 的定时器同时驱动三类过渡：按钮悬停、窗口高度、进度条数值。
 // 没有动画在进行时定时器会被关掉，不产生额外开销。
+// 时长集中在这里定义，保证同一界面里的过渡节奏一致（悬停 120ms、高度 180ms、
+// 进度 150ms），缓动统一走 UiEaseOutCubic。
+static const float kHoverSeconds    = 0.12f;
+static const float kWindowSeconds   = 0.18f;
+static const float kProgressSeconds = 0.15f;
 
 static void StartAnimation() {
     if (!g_mainWnd || g_animRunning) return;
@@ -1180,7 +1345,7 @@ static void TickAnimation(HWND hWnd) {
         { 3, g_hBtn3,    g_hoverBtn[3] ? 1.0f : 0.0f },
         { 5, g_hLangBtn, g_hoverBtn[5] ? 1.0f : 0.0f },
     };
-    const float hoverStep = dt / 0.12f;
+    const float hoverStep = dt / kHoverSeconds;
     for (const BtnTarget& t : targets) {
         if (t.id < 0 || t.id > 7) continue;
         float& v = g_btnHover[t.id];
@@ -1193,7 +1358,7 @@ static void TickAnimation(HWND hWnd) {
 
     // 2) 窗口高度过渡（约 180ms，ease-out）
     if (g_winHT < 1.0f) {
-        g_winHT += dt / 0.18f;
+        g_winHT += dt / kWindowSeconds;
         if (g_winHT >= 1.0f) {
             g_winHT = 1.0f;
             ApplyClientHeight(g_winHTo);   // 收尾精确对齐
@@ -1209,7 +1374,7 @@ static void TickAnimation(HWND hWnd) {
     if (g_progVisible) {
         const double diff = g_progTarget - g_progShown;
         if (diff > 0.25 || diff < -0.25) {
-            double k = dt / 0.15;
+            double k = dt / kProgressSeconds;
             if (k > 1.0) k = 1.0;
             g_progShown += diff * k;
             active = true;
@@ -1252,17 +1417,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         g_mainWnd = hWnd;
-        g_statusText = tr(L"就绪", L"Ready");
         SetWindowTextW(hWnd, tr(L"文件加密工具", L"File Encryptor").c_str());
 
-        HFONT uiFont = UiFont(UiPx(14), false);
+        HFONT uiFont = UiFont(UiPx(15), false);   // 与自绘文字同尺寸，供无障碍/IME 查询
 
-        // 使用 owner-draw 按钮以便绘制圆角，符合 WinUI 3 风格
-        HWND hBtn1 = CreateWindowW(L"BUTTON", tr(L"加密文件", L"Encrypt file").c_str(), WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 30, 30, 140, 40, hWnd, (HMENU)1, GetModuleHandle(NULL), NULL);
-        HWND hBtn2 = CreateWindowW(L"BUTTON", tr(L"解密文件", L"Decrypt file").c_str(), WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 190, 30, 140, 40, hWnd, (HMENU)2, GetModuleHandle(NULL), NULL);
-        HWND hBtn3 = CreateWindowW(L"BUTTON", tr(L"安全删除", L"Secure delete").c_str(), WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 350, 30, 140, 40, hWnd, (HMENU)3, GetModuleHandle(NULL), NULL);
-        // 右上角设置按钮（齿轮图标），同样 owner-draw 以保持风格一致
-        HWND hLang = CreateWindowW(L"BUTTON", L"", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW, 360, 10, 40, 28, hWnd, (HMENU)5, GetModuleHandle(NULL), NULL);
+        // 使用 owner-draw 按钮以便绘制圆角，符合 WinUI 3 风格。
+        // 坐标先给 0，稍后由 LayoutMainControls() 按当前 DPI 统一摆放。
+        // WS_TABSTOP 让按钮进入键盘焦点序列（主窗口自己处理 Tab，没有对话框管理器）。
+        const DWORD btnStyle = WS_VISIBLE | WS_CHILD | BS_OWNERDRAW | WS_TABSTOP;
+        HWND hBtn1 = CreateWindowW(L"BUTTON", tr(L"加密文件", L"Encrypt file").c_str(), btnStyle, 0, 0, 0, 0, hWnd, (HMENU)1, GetModuleHandle(NULL), NULL);
+        HWND hBtn2 = CreateWindowW(L"BUTTON", tr(L"解密文件", L"Decrypt file").c_str(), btnStyle, 0, 0, 0, 0, hWnd, (HMENU)2, GetModuleHandle(NULL), NULL);
+        HWND hBtn3 = CreateWindowW(L"BUTTON", tr(L"安全删除", L"Secure delete").c_str(), btnStyle, 0, 0, 0, 0, hWnd, (HMENU)3, GetModuleHandle(NULL), NULL);
+        // 右上角设置按钮（齿轮图标），同样 owner-draw 以保持风格一致；
+        // 文本不显示，只给无障碍工具朗读，所以这里就要写好。
+        HWND hLang = CreateWindowW(L"BUTTON", tr(L"设置", L"Settings").c_str(), btnStyle, 0, 0, 0, 0, hWnd, (HMENU)5, GetModuleHandle(NULL), NULL);
         g_hBtn1 = hBtn1;
         g_hBtn2 = hBtn2;
         g_hBtn3 = hBtn3;
@@ -1282,6 +1450,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         // 进度条不创建子控件：在 WM_PAINT 里自绘（绿色填充 + 白色扫光 + 下方进度/剩余时间）
+
+        // 长文件名 tooltip：TTF_TRACK 由 WM_MOUSEMOVE 手工控制位置与显隐
+        g_tipWnd = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL,
+                                   WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                   hWnd, NULL, GetModuleHandle(NULL), NULL);
+        if (g_tipWnd) {
+            TOOLINFOW ti = {};
+            ti.cbSize = sizeof(ti);
+            ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+            ti.hwnd = hWnd;
+            ti.uId = 1;
+            ti.lpszText = g_tipText.data();
+            SendMessageW(g_tipWnd, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+            // 长路径限制提示宽度，避免 tooltip 长得超出屏幕
+            SendMessageW(g_tipWnd, TTM_SETMAXTIPWIDTH, 0, (LPARAM)UiPx(520));
+        }
+
+        // 按 DPI 缩放的初始布局（不能等 WM_SIZE：125%/150% 下会先闪一下旧坐标）
+        LayoutMainControls(hWnd);
 
         // 接受文件拖拽
         DragAcceptFiles(hWnd, TRUE);
@@ -1308,8 +1496,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const BOOL isDisabled = (pdis->itemState & ODS_DISABLED) != 0;
             const int ctlId = GetDlgCtrlID(pdis->hwndItem);
 
-            // 动画中的悬停插值（0..1），而不是布尔跳变
-            const float hover = (ctlId >= 0 && ctlId <= 7) ? g_btnHover[ctlId] : 0.0f;
+            // 动画中的悬停插值（0..1），而不是布尔跳变；
+            // 缓动与其它过渡统一走 UiEaseOutCubic，短距离过渡也能看出“减速”手感
+            const float hover = (ctlId >= 0 && ctlId <= 7)
+                                    ? UiEaseOutCubic(g_btnHover[ctlId]) : 0.0f;
 
             // 主操作按钮使用强调色（加密/解密），其余使用标准按钮色
             const bool isPrimary = (ctlId == 1 || ctlId == 2);
@@ -1364,43 +1554,73 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
             else {
-                // 强调色按钮上的文字用灰度抗锯齿：ClearType 在饱和蓝底上会有明显彩边
+                // 文字用常规字重 + 灰度抗锯齿：
+                // 常规字重在中文界面下更清爽（半粗体会让笔画粘连）；
+                // 灰度抗锯齿是因为 ClearType 在饱和蓝底上会有明显彩边
                 UiDrawTextLine(dc, buf, layoutRect,
                                UiFont(smallBtn ? UiPx(13) : UiPx(15), false, isPrimary),
                                textColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+
+            // 键盘焦点环：owner-draw 按钮没有系统默认的焦点矩形，必须自己画，
+            // 否则用 Tab 移动焦点时完全看不出焦点在哪个按钮上。
+            // 强调色/危险色底面上用 onAccent 描边，标准按钮上用 accent。
+            if (g_showFocusRing &&
+                (pdis->itemState & ODS_FOCUS) != 0 &&
+                (pdis->itemState & ODS_NOFOCUSRECT) == 0) {
+                const COLORREF ring = (isPrimary || (isDelete && g_dropOnDelete))
+                                          ? c.onAccent : c.accent;
+                RECT focusRc = inner;
+                InflateRect(&focusRc, -UiPx(4), -UiPx(4));
+                UiDrawRoundRect(dc, focusRc, smallBtn ? UiPx(3) : UiPx(6),
+                                false, c.bg, true, ring);
             }
             return 0;
         }
         break;
     }
 
-    case WM_MOUSEMOVE: {
-        // 通过鼠标位置判断是否悬停在按钮上，并触发重绘
-        int x = (int)(short)LOWORD(lParam);
-        int y = (int)(short)HIWORD(lParam);
-        POINT ptClient = { x, y };
-        POINT ptScreen = ptClient;
-        ClientToScreen(hWnd, &ptScreen);
+    case WM_KEYDOWN:
+        // 窗口重新激活后焦点可能落在主窗口本身（不是某个按钮）：
+        // 这时按 Tab 先把焦点送进按钮组，键盘操作才不会“卡住”。
+        if (wParam == VK_TAB) {
+            SetFocusRingFromKeyboard(true);   // 键盘操作：显示焦点环
+            const bool backwards = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (HWND target = MainButtonById(backwards ? 5 : 1)) SetFocus(target);
+            return 0;
+        }
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
 
-        (void)ptScreen;
+    case WM_LBUTTONDOWN:
+        SetFocusRingFromKeyboard(false);
+        break;
+
+    case WM_MOUSEMOVE: {
         // 按钮悬停由各自的子类化过程（MainBtnSubclassProc）负责：
         // 鼠标位于子控件之上时，父窗口根本收不到 WM_MOUSEMOVE。
+        // 父窗口这里只需要：长文件名的 tooltip + 跟踪鼠标离开事件。
+        UpdateFileNameTooltip(hWnd, (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam));
 
         if (!g_trackingMouse) {
-            // 开始跟踪鼠标离开事件
             TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hWnd, 0 };
             TrackMouseEvent(&tme);
             g_trackingMouse = true;
         }
-
         break;
     }
 
     case WM_MOUSELEAVE: {
         // 清除 hover 状态，交给动画定时器平滑淡出
         g_trackingMouse = false;
+        HideFileNameTooltip();
         break;
     }
+
+    case WM_ACTIVATE:
+        // 窗口失去激活时（切到别的程序/弹窗）track tooltip 不会自动消失，这里手工收起。
+        // 其余情况必须交回 DefWindowProc：窗口重新激活后的置焦由它负责。
+        if (LOWORD(wParam) == WA_INACTIVE) HideFileNameTooltip();
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
 
     case WM_DROPFILES: {
         HDROP hDrop = (HDROP)wParam;
@@ -1459,11 +1679,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (files.size() == 1) {
                 std::wstring blocked;
                 const PwdCollect r = CollectDecryptPassword(hWnd, files[0], pwd_single, blocked);
-                if (r == PwdCollect::Cancelled) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                if (r == PwdCollect::Cancelled) {  break; }
                 if (r == PwdCollect::Blocked) {
                     ShowUiMessage(hWnd, UiIcon::Error, tr(L"无法解密", L"Cannot decrypt"),
                                   files[0] + L"\n" + blocked, true);
-                    SetStatusText(tr(L"已拒绝", L"Refused"));
                     break;
                 }
             }
@@ -1496,9 +1715,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         keptFiles.push_back(files[i]);
                         keptPwd.push_back(onepwd);
                     }
-                    if (cancelled) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                    if (cancelled) {  break; }
                     if (keptFiles.empty()) {
-                        SetStatusText(tr(L"没有可处理的文件", L"Nothing to process"));
                         break;
                     }
                     files = keptFiles;
@@ -1510,11 +1728,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // 失败时于 worker 中各自扣减次数（见 StartProcessing 里的对应注释）。
                     std::wstring blocked;
                     const PwdCollect r = CollectDecryptPassword(hWnd, files[0], pwd_single, blocked);
-                    if (r == PwdCollect::Cancelled) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                    if (r == PwdCollect::Cancelled) {  break; }
                     if (r == PwdCollect::Blocked) {
                         ShowUiMessage(hWnd, UiIcon::Error, tr(L"无法解密", L"Cannot decrypt"),
                                       files[0] + L"\n" + blocked, true);
-                        SetStatusText(tr(L"已拒绝", L"Refused"));
                         break;
                     }
                 }
@@ -1526,7 +1743,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // 单文件加密：要求确认密码
                 if (!CollectEncryptPassword(hWnd, files[0], pwd_single, prot_single, true,
                                             !Settings().decoyDisabled, &decoyFile, &decoyPwd)) {
-                    SetStatusText(tr(L"已取消", L"Cancelled"));
                     break;
                 }
             }
@@ -1543,7 +1759,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 if (UiShowMessage(hWnd, prompt) == IDYES) {
                     if (!CollectEncryptPassword(hWnd, files[0], pwd_single, prot_single, true)) {
-                        SetStatusText(tr(L"已取消", L"Cancelled"));
                         break;
                     }
                 }
@@ -1560,7 +1775,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         perFilePasswords.push_back(onepwd);
                         perFileProts.push_back(oneprot);
                     }
-                    if (cancelled) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+                    if (cancelled) {  break; }
                 }
             }
         }
@@ -1571,28 +1786,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_SIZE: {
-        RECT rcClient;
-        GetClientRect(hWnd, &rcClient);
-        const int W = rcClient.right - rcClient.left;
-
-        const int btnW = MainButtonWidth();
-        const int btnH = UiPx(44);
-        const int btnGap = UiPx(16);
-        const int btnY = UiPx(kMainBtnY);
-
-        int btnX = (W - (btnW * 3 + btnGap * 2)) / 2;
-        if (btnX < UiPx(12)) btnX = UiPx(12);
-        if (g_hBtn1) SetWindowPos(g_hBtn1, NULL, btnX, btnY, btnW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
-        if (g_hBtn2) SetWindowPos(g_hBtn2, NULL, btnX + btnW + btnGap, btnY, btnW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
-        if (g_hBtn3) SetWindowPos(g_hBtn3, NULL, btnX + (btnW + btnGap) * 2, btnY, btnW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
-
-        const int pad = UiPx(24);
-        (void)pad;
-
-        if (g_hLangBtn) {
-            SetWindowPos(g_hLangBtn, NULL, W - UiPx(52), UiPx(10), UiPx(40), UiPx(28), SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-
+        // 尺寸/DPI 变化后重新摆放按钮；布局只有 LayoutMainControls 一处实现。
+        LayoutMainControls(hWnd);
         InvalidateRect(hWnd, NULL, FALSE);
         break;
     }
@@ -1619,8 +1814,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 RECT fileRc = {}, bar = {}, info = {};
                 ProgressRects(rc, fileRc, bar, info);
 
-                // 进度条上方：当前文件名（不含路径，否则显示不全）
-                UiDrawTextLine(dc, g_progFileName, fileRc, UiFont(UiPx(13), false), c.text,
+                // 进度条上方：当前文件名（不含路径，否则显示不全）。
+                // 用半粗体与下面的 45%/剩余时间行拉开层级；超长名用省略号，
+                // 完整路径由 tooltip 补足（见 UpdateFileNameTooltip）。
+                UiDrawTextLine(dc, g_progFileName, fileRc, UiFont(UiPx(13), true), c.text,
                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 // 顶点带一点点圆角即可，不要做成两端半圆
                 const int radius = UiPx(3);
@@ -1681,28 +1878,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 fontMaybeChanged = true;
             }
         }
-        if (fontMaybeChanged) UiFontsReload();
-
-        if (UiThemeRefresh()) {
-            UiApplyFrame(hWnd, true, UiIsDark());
-            ApplyProgressBarTheme();
+        if (fontMaybeChanged) {
+            UiFontsReload();
+            // 换了系统字体后按钮文字宽度会变，窗口宽度/按钮位置要一起重算，
+            // 否则中文→更宽的英文字体时按钮文字会被裁掉。
+            ApplyMainWindowWidth();
+            LayoutMainControls(hWnd);
         }
-        InvalidateRect(hWnd, NULL, FALSE);
-        if (g_hBtn1) InvalidateRect(g_hBtn1, NULL, FALSE);
-        if (g_hBtn2) InvalidateRect(g_hBtn2, NULL, FALSE);
-        if (g_hLangBtn) InvalidateRect(g_hLangBtn, NULL, FALSE);
+
+        if (UiThemeRefresh()) UiApplyFrame(hWnd, true, UiIsDark());
+        InvalidateMainControls();
         break;
     }
 
     case WM_THEMECHANGED:
-        if (UiThemeRefresh()) {
-            UiApplyFrame(hWnd, true, UiIsDark());
-            ApplyProgressBarTheme();
-        }
-        InvalidateRect(hWnd, NULL, FALSE);
-        if (g_hBtn1) InvalidateRect(g_hBtn1, NULL, FALSE);
-        if (g_hBtn2) InvalidateRect(g_hBtn2, NULL, FALSE);
-        if (g_hLangBtn) InvalidateRect(g_hLangBtn, NULL, FALSE);
+        if (UiThemeRefresh()) UiApplyFrame(hWnd, true, UiIsDark());
+        InvalidateMainControls();
         break;
 
     case WM_COMMAND: {
@@ -1716,10 +1907,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // 安全删除：选文件 -> 二次确认 -> 入队（与加解密共用批量/进度/托盘）
         if (id == 3) {
-            SetStatusText(tr(L"请选择要安全删除的文件...", L"Select files to securely delete..."));
             std::vector<std::wstring> picked = PickFilesMulti(hWnd);
             if (picked.empty()) {
-                SetStatusText(tr(L"已取消", L"Cancelled"));
                 break;
             }
             ConfirmAndSecureDelete(hWnd, std::move(picked));
@@ -1728,11 +1917,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         if (id == 1 || id == 2) { // 加密 / 解密（支持多选）
             const bool encrypting = (id == 1);
-            SetStatusText(encrypting ? tr(L"请选择要加密的文件...", L"Select files to encrypt...")
-                                     : tr(L"请选择要解密的文件...", L"Select files to decrypt..."));
 
             std::vector<std::wstring> picked = PickFilesMulti(hWnd);
-            if (picked.empty()) { SetStatusText(tr(L"已取消", L"Cancelled")); break; }
+            if (picked.empty()) {  break; }
 
             // 解密必须全是 .enc 文件
             if (!encrypting) {
@@ -1744,7 +1931,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ShowUiMessage(hWnd, UiIcon::Error, tr(L"错误", L"Error"),
                                   tr(L"解密只能选择 .enc 加密文件！",
                                      L"You can only select .enc files to decrypt!"), false);
-                    SetStatusText(tr(L"不是加密文件", L"Not an encrypted file"));
                     break;
                 }
             }
@@ -1836,19 +2022,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_DESTROY:
+        // tooltip 是主窗口的子窗口，会随主窗口一起销毁；这里只清状态，
+        // 避免后续消息继续往已经无效的句柄发消息。
+        g_tipWnd = NULL;
+        g_tipActive = false;
         TrayRemove();
         UiThemeShutdown();
         PostQuitMessage(0);
         break;
 
-    case WM_APP_SET_STATUS: {
-        LPWSTR msg = (LPWSTR)lParam;
-        if (msg) {
-            SetStatusText(std::wstring(msg));
-            delete[] msg;
-        }
-        break;
-    }
     case WM_COPYDATA: {
         // 另一个实例（右键菜单为每个文件各起一个进程）把清单转发过来
         const COPYDATASTRUCT* cds = (const COPYDATASTRUCT*)lParam;
@@ -1889,11 +2071,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     case WM_APP_SET_FILE: {
-        LPWSTR msg = (LPWSTR)lParam;
-        if (msg) {
-            g_progFileName = msg;
-            delete[] msg;
+        LPWSTR path = (LPWSTR)lParam;
+        if (path) {
+            g_progFilePath = path;
+            g_progFileName = FileNameOf(g_progFilePath);
+            delete[] path;
         }
+        HideFileNameTooltip();
         InvalidateRect(hWnd, NULL, FALSE);
         break;
     }
@@ -1909,6 +2093,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const BOOL show = (wParam != 0);
         // 空闲时窗口是紧凑的；开始/结束任务时在两种高度之间过渡，避免留下大片空白
         SetBusyLayout(show != 0);
+        HideFileNameTooltip();   // 文件名行要变/消失，先把旧 tooltip 收起来
         if (show) {
             g_progShown = 0.0;
             g_progTarget = 0.0;
@@ -1916,12 +2101,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_progStartTick = GetTickCount64();   // 用于估算剩余时间
             g_etaLastTick = 0;
             g_etaText.clear();
+            // 清掉上一批任务的文件名，避免新任务开始瞬间还显示旧文件
+            g_progFileName.clear();
+            g_progFilePath.clear();
             g_progVisible = true;
         }
         else {
             // 收尾：直接对齐到目标值，避免进度条停在半路
             g_progShown = g_progTarget;
             g_progVisible = false;
+            g_progFileName.clear();
+            g_progFilePath.clear();
         }
         StartAnimation();
         break;
@@ -1972,8 +2162,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
-// 进度条已自绘，配色随主题自动生效，这里保留空实现以兼容调用点
-static void ApplyProgressBarTheme() {}
+// 进度条已自绘，配色随主题自动生效（原先的 ApplyProgressBarTheme 空实现已删除）
 
 // 统一的消息提示入口：WinUI 3 风格 + 全局语言 + 提示音
 static void ShowUiMessage(HWND owner, UiIcon icon, const std::wstring& caption,
@@ -2218,16 +2407,11 @@ static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int pass
     // 用在这里会让按钮名不副实。总工作量与实际写入必须用同一个值。
     const int  usePasses = (passes > 0) ? passes : 1;
 
-    auto postStatus = [](const std::wstring& text) {
-        wchar_t* buf = new wchar_t[text.size() + 1];
-        wcscpy_s(buf, text.size() + 1, text.c_str());
-        PostMessageW(g_mainWnd, WM_APP_SET_STATUS, 0, (LPARAM)buf);
-    };
     auto postFileName = [](const std::wstring& path) {
-        const size_t pos = path.find_last_of(L"\\/");
-        const std::wstring name = (pos == std::wstring::npos) ? path : path.substr(pos + 1);
-        wchar_t* buf = new wchar_t[name.size() + 1];
-        wcscpy_s(buf, name.size() + 1, name.c_str());
+        // 整条路径都发给 UI 线程：界面只显示文件名（超长用省略号），
+        // 完整路径留给 tooltip，这样同名文件也能分辨。
+        wchar_t* buf = new wchar_t[path.size() + 1];
+        wcscpy_s(buf, path.size() + 1, path.c_str());
         PostMessageW(g_mainWnd, WM_APP_SET_FILE, 0, (LPARAM)buf);
     };
     auto postMessage = [](UiIcon icon, const std::wstring& caption,
@@ -2268,7 +2452,6 @@ static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int pass
         const std::wstring& f = files[i];
         ProgressBeginFile(perFileBytes[i]);   // 缺了这句 g_progFileTotal 就是 0
         postFileName(f);
-        postStatus(english ? L"Securely deleting..." : L"正在安全删除...");
         try {
             // 本地包装已把 fe:: 上报的累计字节转成增量，所以这里用 ProgressAdd
             SecureDeleteFile(f, usePasses, [](uint64_t n) { ProgressAdd(n); });
@@ -2316,14 +2499,12 @@ static void RunSecureDeleteTask(const std::vector<std::wstring>& files, int pass
     }
 
     if (failedList.empty()) {
-        postStatus(english ? L"Done" : L"完成");
         const std::wstring text = english
             ? (L"Securely deleted " + std::to_wstring(okCount) + L" file(s).")
             : (L"已安全删除 " + std::to_wstring(okCount) + L" 个文件。");
         postMessage(UiIcon::Info, english ? L"Done" : L"完成", text, true);
     }
     else {
-        postStatus(english ? L"Partially failed" : L"部分失败");
         const std::wstring text =
             (english ? L"The following files could not be deleted:\n\n"
                      : L"以下文件删除失败：\n\n") + failedList;
@@ -2559,7 +2740,6 @@ static void EnqueueAndRun(TaskRequest task) {
         const std::wstring fixedDir = cfg.fixedOutDir;
 
         const bool english = g_langEnglish;
-        const size_t fileCount = files.size();
 
         // 统计所有输入文件的总字节数，用于跨文件的整体进度。
         // 加密后如果还要覆写删除源文件，那部分耗时同样计入总工作量——
@@ -2586,17 +2766,10 @@ static void EnqueueAndRun(TaskRequest task) {
         std::vector<std::wstring> failures;
         size_t processed = 0;
 
-        auto postStatus = [](const std::wstring& text) {
-            wchar_t* buf = new wchar_t[text.size() + 1];
-            wcscpy_s(buf, text.size() + 1, text.c_str());
-            PostMessageW(g_mainWnd, WM_APP_SET_STATUS, 0, (LPARAM)buf);
-        };
-        // 进度条上方显示的文件名：只取文件名，带路径会显示不全
+        // 进度条上方显示的文件名：整条路径发给 UI 线程（界面截成文件名 + tooltip 用完整路径）
         auto postFileName = [](const std::wstring& path) {
-            const size_t pos = path.find_last_of(L"\\/");
-            const std::wstring name = (pos == std::wstring::npos) ? path : path.substr(pos + 1);
-            wchar_t* buf = new wchar_t[name.size() + 1];
-            wcscpy_s(buf, name.size() + 1, name.c_str());
+            wchar_t* buf = new wchar_t[path.size() + 1];
+            wcscpy_s(buf, path.size() + 1, path.c_str());
             PostMessageW(g_mainWnd, WM_APP_SET_FILE, 0, (LPARAM)buf);
         };
         auto postMessage = [](UiIcon icon, const std::wstring& caption,
@@ -2613,8 +2786,8 @@ static void EnqueueAndRun(TaskRequest task) {
             const std::wstring& f = files[idx];
             const bool isEnc = (f.size() >= 4 && f.substr(f.size() - 4) == L".enc");
 
-            // 进度条上方只显示文件名（不再显示整条路径），整体进度由下方“已完成 x / y”体现
-            (void)isEnc;
+            // 进度条上方只显示文件名（超长省略号 + tooltip 显示完整路径），
+            // 整体进度由下方“已完成 x / y”体现
             postFileName(f);
 
             std::string usePwd;
@@ -2668,7 +2841,7 @@ static void EnqueueAndRun(TaskRequest task) {
                             ProgressBeginFile(fileBytes * (uint64_t)deletePasses);
                             SecureDeleteFile(f, deletePasses, [](uint64_t n) { ProgressAdd(n); });
                             ProgressEndFile();
-                                        }
+                        }
                         else {
                             SecureDeleteFile(f, 0);
                         }
@@ -2712,7 +2885,6 @@ static void EnqueueAndRun(TaskRequest task) {
                 if (i) body += L"\n\n";
                 body += failures[i];
             }
-            postStatus(english ? L"Completed with errors" : L"完成（存在失败）");
             postMessage(UiIcon::Error,
                         english ? L"Failed" : L"失败",
                         (english ? L"Failed to process the following file(s):\n\n"
@@ -2721,7 +2893,6 @@ static void EnqueueAndRun(TaskRequest task) {
         }
         else if (processed == 0) {
             // 全部被跳过（用户逐个取消了保存对话框）
-            postStatus(english ? L"Cancelled" : L"已取消");
         }
         else {
             const bool encryptOp = files.empty() ||
@@ -2747,7 +2918,6 @@ static void EnqueueAndRun(TaskRequest task) {
                                       : tr(L"加密文件已删除。", L" Encrypted files were deleted.");
                 }
             }
-            postStatus(english ? L"Ready" : L"就绪");
             postMessage(UiIcon::Info, english ? L"Success" : L"成功", text, true);
         }
 
@@ -2810,14 +2980,9 @@ static void ShowSettingsDialog(HWND owner) {
     UpdateLanguageUI();
     ApplyMainWindowWidth();
     UiSetThemeOverride((int)w.theme);
-    if (g_mainWnd) {
-        UiApplyFrame(g_mainWnd, true, UiIsDark());
-        ApplyProgressBarTheme();
-        InvalidateRect(g_mainWnd, NULL, FALSE);
-    }
-    if (g_hBtn1) InvalidateRect(g_hBtn1, NULL, FALSE);
-    if (g_hBtn2) InvalidateRect(g_hBtn2, NULL, FALSE);
-    if (g_hLangBtn) InvalidateRect(g_hLangBtn, NULL, FALSE);
+    if (g_mainWnd) UiApplyFrame(g_mainWnd, true, UiIsDark());
+    // 四颗自绘按钮一起重绘：之前漏了「安全删除」，切完主题它会残留旧配色
+    InvalidateMainControls();
 }
 
 // “每次都询问”输出位置时，工作线程请求 UI 线程弹一次保存对话框
@@ -3049,6 +3214,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     ShowWindow(hWnd, nShowCmd);
     UpdateWindow(hWnd);
+
+    // 初始焦点放在「加密文件」按钮：键盘用户不必先点鼠标，
+    // 可以直接 Tab / Shift+Tab 循环焦点、Enter 或空格触发。
+    if (g_hBtn1) SetFocus(g_hBtn1);
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {

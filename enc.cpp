@@ -13,24 +13,14 @@
 #define NOMINMAX
 #endif
 
-#include "file_format.h"   // 文件格式的唯一定义（与 GUI 共用）
-#include "file_crypto.h"
-#include "update_check.h"   // 检查更新（与 GUI 共用实现）   // 加解密核心的唯一实现（与 GUI 共用）
+#include "file_crypto.h"    // 加解密核心的唯一实现（与 GUI 共用）
+#include "update_check.h"   // 检查更新（与 GUI 共用实现）
 using namespace fe;
-using fe::PutU16; using fe::PutU32; using fe::PutU64;
-using fe::GetU16; using fe::GetU32; using fe::GetU64;
 #include <iostream>
-#include <fstream>
 #include <vector>
 #include <string>
 #include <cstdint>
-#include <memory>
 #include <filesystem>
-#include <cstring>
-#include <algorithm>
-#include <chrono>
-#include <thread>
-#include <ctime>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -194,12 +184,12 @@ enum Strength { STRENGTH_FAST = 0, STRENGTH_STANDARD = 1, STRENGTH_SECURE = 2, S
 
 int strength_iterations(int strength) {
     switch (strength) {
-    case STRENGTH_FAST:     return 50000;
-    case STRENGTH_STANDARD: return 100000;
-    case STRENGTH_SECURE:   return 300000;
+    case STRENGTH_FAST:     return 150000;
+    case STRENGTH_STANDARD: return 300000;
+    case STRENGTH_SECURE:   return 450000;
     case STRENGTH_EXTREME:  return 600000;
     }
-    return 100000;
+    return 300000;
 }
 // ---------------- 与共用实现的适配层 ----------------
 // 真正的逻辑在 file_crypto.cpp（CLI 与 GUI 共用一份）。
@@ -270,6 +260,7 @@ void decrypt_file(const std::string& input_path, const std::string& output_path,
 void print_usage(const char* prog_name) {
     std::cout << T("用法: ") << prog_name << T(" <文件> [选项]") << std::endl;
     std::cout << T("                .enc 结尾按解密处理，其它按加密处理") << std::endl;
+    std::cout << T("                --delete <文件...> 只删除文件；--check-update 不需要输入文件") << std::endl;
     std::cout << T("  -o <目录>     输出目录（默认与输入文件同目录）") << std::endl;
     std::cout << T("  -p <密码>     密码（可选）。如不提供，会交互式输入") << std::endl;
     std::cout << T("  -s <强度>     加密强度：fast|standard|secure|extreme（默认 standard）") << std::endl;
@@ -277,11 +268,12 @@ void print_usage(const char* prog_name) {
     std::cout << T("  -w <次数>     源文件处理：0=保留源文件（等同 -k），1-10=删除前覆写次数（默认 3）") << std::endl;
     std::cout << T("  -k, --keep    保留源文件（加密时）/ 加密文件（解密时），不做删除") << std::endl;
     std::cout << T("                说明：解密后的加密文件不含明文残留，删除时不覆写") << std::endl;
-    std::cout << T("  --decoy <文件>      可否认加密：指定诱饵文件") << std::endl;
+    std::cout << T("  --decoy <文件>      可否认加密：指定诱饵文件（别名 --decoy-file）") << std::endl;
     std::cout << T("  --decoy-pass <密码> 可否认加密：假密码，用它解密得到的是诱饵文件") << std::endl;
     std::cout << T("                      两者必须同时给出；受胁迫时交出假密码即可") << std::endl;
     std::cout << T("                      真实内容进哪个槽是随机的，文件本身看不出哪个是诱饵") << std::endl;
-    std::cout << T("  --no-decoy          只写一个槽，文件体积约 1 倍") << std::endl;
+    std::cout << T("  --no-decoy          只写一个槽，文件体积约 1 倍（别名 --single-slot）") << std::endl;
+    std::cout << T("                      不能与 --decoy 同时使用") << std::endl;
     std::cout << T("                      代价：体积会暴露「没有诱饵」，不可否认性减弱") << std::endl;
     std::cout << T("安全删除（只删文件，不加密也不解密）:") << std::endl;
     std::cout << T("  --delete, -D <文件...>  用随机数据覆写后删除；可一次给多个文件") << std::endl;
@@ -291,12 +283,13 @@ void print_usage(const char* prog_name) {
     std::cout << T("  -x, --on-exhaust <动作>  次数用尽后：delete=永久删除文件（默认）,") << std::endl;
     std::cout << T("                           lock=禁止解密一段时间") << std::endl;
     std::cout << T("  -l, --lock-days <天数>   lock 模式下的锁定时长（0-3650，默认 7）") << std::endl;
-    std::cout << T("随机生成密码（加密时，可代替 -p）:") << std::endl;
+    std::cout << T("随机生成密码（加密时，可代替 -p；与 -p 互斥）:") << std::endl;
     std::cout << T("  --gen, -g        生成一个随机密码并显示，回车后开始加密") << std::endl;
     std::cout << T("  --gen-len <n>    密码长度（4-128，默认 20）") << std::endl;
     std::cout << T("  --gen-sets <list> 包含的字符类别：upper,lower,digits,symbols（默认全含）") << std::endl;
     std::cout << T("  --check-update, -U  检查发布页上是否有更新的构建（会下载比对）") << std::endl;
-    std::cout << T("  --lang <zh|en> 输出语言（默认 en）") << std::endl;
+    std::cout << T("                      退出码：0=已是最新，1=检查失败，2=有新版本") << std::endl;
+    std::cout << T("  --lang, -L <zh|en> 输出语言（默认 en）") << std::endl;
     std::cout << T("  -h, --help    显示帮助") << std::endl;
     std::cout << T("示例:") << std::endl;
     std::cout << T("  交互式加密: ") << prog_name << " secret.txt" << std::endl;
@@ -338,8 +331,23 @@ int main(int argc, char* argv[]) {
     int  gen_len = 20;
     fe::PasswordRules gen_rules;
     
+    // 需要取值的选项：缺少值时要报“需要一个值”，而不是落到“无法识别的参数”
+    static const char* const kValueOptions[] = {
+        "-o", "-p", "-s", "-w", "-t", "-x", "-l",
+        "--max-tries", "--on-exhaust", "--lock-days",
+        "--decoy", "--decoy-file", "--decoy-pass",
+        "--lang", "-L", "--gen-len", "--gen-sets",
+    };
     for (int i = 1; i < argc; ++i) {
         std::string arg = ArgToUtf8(argv[i]);
+        bool needsValue = false;
+        for (const char* opt : kValueOptions) {
+            if (arg == opt) { needsValue = true; break; }
+        }
+        if (needsValue && i + 1 >= argc) {
+            std::cerr << T("错误：") << arg << T(" 需要一个值") << std::endl;
+            return 1;
+        }
         if (arg == "--gen" || arg == "-g") {
             gen_password = true;
         } else if ((arg == "--gen-len") && i + 1 < argc) {
@@ -421,7 +429,7 @@ int main(int argc, char* argv[]) {
             try {
                 overwrite_passes = std::stoi(s);
             } catch (...) {
-                std::cerr << T("错误：-w 需要一个整数（0=保留源文件，1/3=覆写次数）") << std::endl;
+                std::cerr << T("错误：-w 需要一个整数（0=保留源文件/直接删除，1-10=覆写次数）") << std::endl;
                 return 1;
             }
             if (overwrite_passes < 0 || overwrite_passes > 10) {
@@ -452,7 +460,7 @@ int main(int argc, char* argv[]) {
             checkUpdate = true;
         } else if (!arg.empty() && arg[0] != '-') {
             // 位置参数：--delete 之后是要删除的文件（可多个），
-            // 否则就是输入文件（不再需要 -i，直接写路径）
+            // 否则就是输入文件（直接写成位置参数）
             if (mode == "--delete") {
                 delete_files.push_back(arg);
             } else if (input_file.empty()) {
@@ -471,8 +479,26 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     }
-    
-    // 不指定 -e / -d 时按后缀自动判断：.enc 结尾 = 解密，否则 = 加密
+
+    // 参数解析完才知道最终语言（--lang 可以出现在任意位置）：把语言同步给共享实现，
+    // 让 FormatDuration / ConsumeAttempt 的提示文字与 CLI 输出语言一致。
+    // 只影响显示文字，不影响文件格式与加解密。
+    fe::SetCryptoMessagesEnglish(!g_zh);
+
+    // 可否认加密：--decoy 与 --decoy-pass 必须成对出现（帮助文本就是这么写的）。
+    // 只给假密码而不给诱饵文件时选项会被静默忽略，用户会误以为已经启用。
+    if (decoy_pwd_provided && decoy_file.empty()) {
+        std::cerr << T("错误：使用 --decoy-pass 时必须同时提供 --decoy（诱饵文件）") << std::endl;
+        return 1;
+    }
+    // --no-decoy（单槽）与诱饵互斥：单槽文件没有第二个槽可以放诱饵，
+    // 同时给出会让 --decoy 被静默忽略。
+    if (single_slot && !decoy_file.empty()) {
+        std::cerr << T("错误：--no-decoy 不能与 --decoy 同时使用") << std::endl;
+        return 1;
+    }
+
+    // 没有 -e / -d 选项：按后缀自动判断：.enc 结尾 = 解密，否则 = 加密
     // --check-update 不需要输入文件，也不进入加密/解密模式
 
     if (mode.empty() && !checkUpdate) {
@@ -484,7 +510,7 @@ int main(int argc, char* argv[]) {
                    ? "-d" : "-e";
 
     }
-    // --delete 可以用位置参数给文件，所以不强制 -i；--check-update 根本不需要文件
+    // --delete 可以用位置参数给文件，所以不强制输入文件；--check-update 根本不需要文件
     if (checkUpdate) {
         // 交给下面的检查更新分支处理
     }
@@ -534,7 +560,7 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
                 if (overwrite_passes > 0) {
-                    std::cout << T("正在安全删除（覆写 ") << overwrite_passes << T(" 次）: ") << f << std::endl;
+                    std::cout << T("正在安全删除（覆写 ") << overwrite_passes << T(" 次）") << ": " << f << std::endl;
                 } else {
                     std::cout << T("正在删除: ") << f << std::endl;
                 }

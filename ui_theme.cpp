@@ -12,7 +12,6 @@
 #include <d2d1.h>
 #include <string>
 #include <utility>
-#include <cstring>
 #include <cwchar>
 #include <cwctype>
 
@@ -384,10 +383,6 @@ ID2D1Factory* D2DFactory() {
     return g_d2dFactory;
 }
 
-// 注意：**不要复用** DC 渲染目标。实测在同一个 HDC 上第二次及以后调用 BindDC，
-// BeginDraw/EndDraw 不再产生任何像素（只有第一次的绘制会落到 DC 上），
-// 会导致同一窗口里后续绘制的元素（状态栏底色、输入框白框、卡片描边）静默丢失。
-// 因此每次绘制都新建一个渲染目标，用完立即释放。
 // 渲染目标缓存。
 //
 // 之前每调用一次绘制就 CreateDCRenderTarget 一次，画一个按钮要建 3~5 个
@@ -559,7 +554,8 @@ void UiDrawSheen(HDC dc, const RECT& rc, int radiusPx, float centerX, int halfWi
 }
 
 void UiDrawTextLine(HDC dc, const std::wstring& text, const RECT& rc,
-                    HFONT font, COLORREF color, UINT flags) {    if (!dc || text.empty()) return;
+                    HFONT font, COLORREF color, UINT flags) {
+    if (!dc || text.empty()) return;
     HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
     const int oldMode = SetBkMode(dc, TRANSPARENT);
     const COLORREF oldColor = SetTextColor(dc, color);

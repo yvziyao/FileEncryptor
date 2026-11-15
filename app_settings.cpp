@@ -1,4 +1,4 @@
-#include "app_settings.h"
+﻿#include "app_settings.h"
 #include "FileEncryptor_helpers.h"
 
 #include <string>
@@ -97,6 +97,8 @@ void SettingsLoad() {
     if (kbps < 1024)        kbps = 1024;
     if (kbps > 8u * 1024u * 1024u) kbps = 8u * 1024u * 1024u;
     s.delKBps = (int)kbps;
+
+    s.updateWarnSkip = (int)RegGetDword(L"UpdateWarnSkip", 0);
 }
 
 void SettingsSave() {
@@ -115,6 +117,7 @@ void SettingsSave() {
     RegSetDword(L"PwGenDigits",  s.pwGenDigits  ? 1 : 0);
     RegSetDword(L"PwGenSymbols", s.pwGenSymbols ? 1 : 0);
     RegSetDword(L"DelKBps", (DWORD)s.delKBps);
+    RegSetDword(L"UpdateWarnSkip", (DWORD)s.updateWarnSkip);
     RegSetDword(L"KeepSource", s.keepSource ? 1 : 0);
     RegSetDword(L"ShellMenu", s.shellMenu ? 1 : 0);
 }
@@ -172,15 +175,6 @@ std::wstring OutDirName(OutDirMode d) {
     case OutDirMode::SourceDir:    return tr(L"源文件同目录", L"Same folder");
     case OutDirMode::FixedDir:     return tr(L"指定目录", L"Fixed folder");
     case OutDirMode::AskEveryTime: return tr(L"每次都询问", L"Ask each time");
-    }
-    return std::wstring();
-}
-
-std::wstring SecureDeleteName(int passes) {
-    switch (passes) {
-    case 0:  return tr(L"不删除", L"Keep");
-    case 1:  return tr(L"覆写 1 次", L"1 pass");
-    case 3:  return tr(L"覆写 3 次", L"3 passes");
     }
     return std::wstring();
 }

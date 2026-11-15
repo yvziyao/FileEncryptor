@@ -1,4 +1,4 @@
-# FileEncryptor
+﻿# FileEncryptor
 
 **English** | [中文](README.md)
 
@@ -11,7 +11,7 @@ A streaming file encryption tool built on AES-256-GCM and PBKDF2-HMAC-SHA256. La
 
 * **Authenticated encryption**: AES-256-GCM with PBKDF2-HMAC-SHA256 key derivation. The ciphertext carries its own auth tag, so a wrong password or a tampered file is reliably detected
 * **Large files**: streaming chunked processing keeps memory usage low
-* **Secure delete**: a standalone feature that overwrites with random data 1-3 times and then deletes (four entry points: button / drag-and-drop / context menu / CLI); deleting a folder removes the directories too
+* **Secure delete**: a standalone feature that overwrites with random data 1-3 times (GUI) or 0-10 times (CLI, 0 = delete without overwriting) and then deletes (four entry points: button / drag-and-drop / context menu / CLI); in the GUI, deleting a folder also removes its now-empty directories
 * **Configurable deletion**: keep or overwrite-delete the source after encrypting; the encrypted file can be deleted directly after decrypting
 * **No third-party dependencies**: all cryptography uses the CNG (bcrypt) built into Windows — nothing else to install
 * **Format compatible**: the GUI and CLI use exactly the same file format and can decrypt each other's output
@@ -28,17 +28,15 @@ A streaming file encryption tool built on AES-256-GCM and PBKDF2-HMAC-SHA256. La
 
 | Item | Notes |
 |---|---|
-| OS | **Windows 10 / 11 (x64)** — the recommended and tested environment |
+| OS | **Windows 8 or later (x64)** — Windows 10 / 11 are the recommended environments |
 | Architecture | x64 only (cryptography uses system CNG; switching to 32-bit is just a platform change) |
 | Runtime | **Nothing to install** — static CRT, cryptography via Windows CNG (bcrypt), a single EXE with no external DLLs |
 | DPI | Declared system-DPI aware; crisp at 125% / 150% scaling |
 | Privileges | `asInvoker` — no administrator rights needed |
 
-**Older systems**: the PE header minimum version is 6.00 (Vista) and the import table contains no
-Win8/Win10-only APIs, so it could in theory start on Windows 7 SP1 — but it cannot: the cryptography
-relies on the system CNG, and `BCryptDeriveKeyPBKDF2` **requires Windows 8**. On Windows 7 that
-function does not exist, so key derivation fails and the program does not work. The following effects
-work on newer systems:
+**Why not Windows 7**: the cryptography relies on the system CNG, and `BCryptDeriveKeyPBKDF2`
+**requires Windows 8**. That API does not exist on Windows 7, so the program does not run.
+The following effects work on newer systems:
 
 | Effect | Minimum |
 |---|---|
@@ -52,8 +50,7 @@ corners with the default title bar. **Verified on Windows 8.1 / 10 / 11.**
 
 > Note: the program does not embed the `Microsoft.Windows.Common-Controls 6.0` manifest, so standard
 > controls render in the classic style. Since all UI is hand-drawn (and calls
-> `SetWindowTheme(h, L"", L"")` to disable themes), this has no visual impact; APIs such as
-> `SetWindowSubclass` are resolved through comctl32 v5's ordinal exports.
+> `SetWindowTheme(h, L"", L"")` to disable themes), this has no visual impact.
 
 ### CLI version
 
@@ -87,7 +84,7 @@ Offset 16   lockDays[2]
 Offset 18   saltA[16]
 Offset 34   IV_A[12]        96-bit GCM nonce
 Offset 46   verifierA[8]
-Offset 54   slotA length[8] little endian
+Offset 54   slotA length[8] little endian (includes the 16-byte GCM tag)
 Offset 62   saltB[16]
 Offset 78   IV_B[12]
 Offset 90   verifierB[8]
@@ -112,7 +109,7 @@ then        ciphertext B (until end of file)
 * Encryption **randomly decides** which slot holds the real payload, removing statistical tells like "the real file is always in A"
 * With no decoy, both slots are still written; the other slot is filled with random data
   (50%-150% of the real ciphertext length), so **even the existence of a second payload cannot be determined**
-* Cost: **the file is always about 2x the plaintext**
+* Cost: **the file is about 2x the plaintext by default** (about 1x in single-slot mode; see "Disable decoy" below)
 
 **Format support**:
 
@@ -125,7 +122,7 @@ then        ciphertext B (until end of file)
 
 ## 🖥️ GUI version
 
-For Windows 10/11, with a clean graphical interface.
+For Windows 8 or later (x64), with a clean graphical interface.
 
 ### Highlights
 
@@ -138,8 +135,9 @@ For Windows 10/11, with a clean graphical interface.
   * Encryption strength: Fast / Standard / Secure / Extreme
   * **Keep source files after encrypting/decrypting**
   * **Disable decoy**: writes a single slot, ~1x the size instead of 2x — the trade-off is that the size reveals "no decoy"
+  * **Show in Explorer context menu**: unchecking it removes the registered menu items immediately
 * **Modern UI**: hand-drawn WinUI 3 style interface, rounded controls, hover and progress animations, dark mode
-* **Password strength meter**: live color grading (very weak / weak / good / strong)
+* **Password strength meter**: live color grading (very weak / fair / good / strong)
 * **Random password generation**: a "Generate" button sits at the right of the password field.
   It creates a 20-character password (uppercase + lowercase + digits + symbols), fills both the
   password and confirm fields, switches to plaintext and selects it all so Ctrl+C just works.
@@ -179,7 +177,7 @@ enc --delete temp.log -w 0
 * **Every delete in the GUI asks for confirmation first**, stating the file count and pass count; it cannot be undone
   (the CLI, as usual for command-line tools, does not prompt)
 * Shares the same task queue as encryption, so **batching, the progress bar, the tray icon and the queue counter** all apply
-* The pass count comes from the settings panel (1-3); on the command line use `-w` (0-10)
+* The pass count is taken from the settings panel (1-3); on the command line use `-w` (0-10, 0 = delete without overwriting)
 
 > ⚠️ **About overwriting**: in full-disk encryption (BitLocker), SSD wear leveling, copy-on-write
 > file systems (ReFS / Btrfs / ZFS) or cloud-synced folders, overwriting **does not guarantee** the
@@ -255,9 +253,36 @@ It builds the GUI and CLI first, then embeds both exes as `RCDATA` via `setup.rc
 > optimisation makes the installer crash with `STATUS_ILLEGAL_INSTRUCTION (0xC000001D)`.
 > The GUI and CLI are fine with LTCG; only the installer hits this.
 
+### Download and use
+
+1. Download `FileEncryptor.exe` (portable) or `FileEncryptorSetup.exe` (installer) from the
+   [Releases](https://github.com/yvziyao/FileEncryptor/releases) page
+2. Run it and click **Encrypt**, **Decrypt** or **Secure delete**
+3. Pick the target files and enter a password (you can also drag files into the window)
+
+### Automated build & release
+
+- **CI** (`.github/workflows/ci.yml`) runs `build_setup.cmd` on every push/PR to verify all three targets.
+- **Release** (`.github/workflows/release.yml`) builds GUI / CLI / installer + MSIX on a `v*` tag
+  (or manual dispatch), writes `SHA256SUMS.txt` and publishes a GitHub Release.
+- **MSIX** (`msix/`): `msix\build_msix.ps1` generates the Store art, packs and (locally) signs
+  `x64\msix\FileEncryptor.msix`.
+
+> **Before submitting to the Microsoft Store** replace `Publisher` in
+> `msix/AppxManifest.xml` with the Partner Center publisher ID (looks like `CN=8B1A...`).
+> The Store Product ID (`9PK12VV60DDN`) is only used for the Store link and is unrelated to the
+> package identity; `Identity Name` is the MSIX package name `7C5755A7.FileEncryptorTool`.
+
 ### Checking for updates
 
-Settings has a "⟳ Check for updates" button in the bottom-left corner. It **downloads the published
+Settings has a "⟳ Check for updates" button in the bottom-left corner. It first shows a warning:
+
+> If you installed this app from the Microsoft Store, please do not update this way:
+> it may cause unexpected errors and corrupt other files.
+
+(Tick "Don't show this again" to hide it; the state lives in the `UpdateWarnSkip` registry value.)
+
+After confirming, it It **downloads the published
 `FileEncryptor.exe`, hashes it, and compares the SHA-256 with your local exe**:
 
 * Different hash → asks "New version available. Update now?"
@@ -279,7 +304,7 @@ Settings has a "⟳ Check for updates" button in the bottom-left corner. It **do
 
 ## ⌨️ CLI version
 
-For Windows; suitable for servers, remote environments or automation.
+For Windows 8 or later (x64); suitable for servers, remote environments or automation.
 
 ### Build
 
@@ -287,24 +312,28 @@ For Windows; suitable for servers, remote environments or automation.
 
 ```bat
 cl /EHsc /std:c++17 /MT /O2 /GL /DNOMINMAX /utf-8 ^
-   enc.cpp file_crypto.cpp /Fe"enc.exe" ^
+   enc.cpp file_crypto.cpp update_check.cpp /Fe"enc.exe" ^
    /link /LTCG ^
    ws2_32.lib gdi32.lib crypt32.lib advapi32.lib user32.lib
 ```
 
-> `/utf-8` is recommended: the sources are UTF-8 (with BOM) so the compiler detects them correctly,
-> but MSVC's execution character set follows the system ANSI code page by default. With `/utf-8`
-> the Chinese messages are UTF-8 under any locale. The source also uses
-> `#pragma execution_character_set("utf-8")` as a fallback.
+> All three sources are required: omitting `update_check.cpp` fails to link with unresolved
+> `CheckForUpdate` / `UpdateCheckSetEnglish`.
+> `/utf-8` is required: the sources are UTF-8 (some files carry a BOM, some do not), and MSVC
+> otherwise interprets source files using the system ANSI code page — without the flag, Chinese
+> messages may be garbled or fail to compile. The source also uses
+> `#pragma execution_character_set("utf-8")` to pin the execution character set to UTF-8.
 
 > **Dependencies**: none — cryptography (AES-256-GCM / PBKDF2-HMAC-SHA256 / HMAC-SHA256 / RNG)
 > all uses the CNG (bcrypt) built into Windows; the Windows SDK is enough to build.
-> The Windows-only libraries (`ws2_32` / `gdi32` / `crypt32` / `advapi32` / `user32`) ship with the OS.
+> `bcrypt.lib` / `winhttp.lib` are pulled in by `#pragma comment(lib, ...)` in the sources, so the
+> command line only lists the OS libraries `ws2_32` / `gdi32` / `crypt32` / `advapi32` / `user32`.
 
 ### Non-ASCII and path encoding
 
-* Sources are **UTF-8 (with BOM)** and also compile correctly on machines whose ANSI code page is
-  not UTF-8 (e.g. the default Simplified Chinese Windows, code page 936)
+* Sources are **UTF-8** (some files carry a BOM, some do not); with `/utf-8` they also compile
+  correctly on machines whose ANSI code page is not UTF-8 (e.g. the default Simplified Chinese
+  Windows, code page 936)
 * Internally paths are kept as **UTF-8** and converted to UTF-16 before file API calls, so
   **non-ASCII file names and output folders work under any locale**
 * The console output code page is switched to UTF-8 on startup (and restored on exit) so messages
@@ -316,7 +345,7 @@ cl /EHsc /std:c++17 /MT /O2 /GL /DNOMINMAX /utf-8 ^
 # interactive encryption (prompts for the password and confirms)
 enc file.txt
 
-# password on the command line (encryption still confirms)
+# password on the command line (no further confirmation)
 enc file.txt -p yourpassword
 
 # specify strength (fast | standard | secure | extreme, default standard)
@@ -347,29 +376,38 @@ enc file.txt.enc -p yourpassword -o D:\Decrypted -k
 | `-o <dir>` | Output folder, default is the input file's folder. Must already exist |
 | `-p <password>` | Password; if omitted you are prompted (input is not echoed) |
 | `-s <strength>` | `fast` / `standard` / `secure` / `extreme`, default `standard` |
-| `-w <count>` | Source handling: `0` = **keep the source** (same as `-k`), `1`-`10` = overwrite passes before deleting, default `3` |
+| `-w <count>` | Source handling: `0` = **keep the source** (same as `-k`), `1`-`10` = overwrite passes before deleting, default `3`; in `--delete` mode `0` = delete without overwriting |
 | `-k` / `--keep` | Keep the source (when encrypting) / the encrypted file (when decrypting); no deletion |
-| `-t <count>` | **Enable anti-brute-force**: allowed wrong attempts (1-9999). Not enabled if omitted |
-| `-x <action>` | When exhausted: `delete` = permanently delete (default), `lock` = block decryption for a period |
-| `-l <days>` | Lock duration in `lock` mode (0-3650, default 7) |
-| `--decoy <file>` | **Deniable encryption**: specify a decoy file to hand over under coercion |
+| `-t` / `--max-tries <count>` | **Enable anti-brute-force**: allowed wrong attempts (1-9999). Not enabled if omitted |
+| `-x` / `--on-exhaust <action>` | When exhausted: `delete` = permanently delete (default), `lock` = block decryption for a period |
+| `-l` / `--lock-days <days>` | Lock duration in `lock` mode (0-3650, default 7) |
+| `--decoy` / `--decoy-file <file>` | **Deniable encryption**: specify a decoy file to hand over under coercion |
 | `--decoy-pass <pwd>` | **Deniable encryption**: the fake password that opens the decoy |
-| `--no-decoy` | Write a single slot, ~1x the size (default 2x). The trade-off is that the size reveals "no decoy" |
-| `--gen` / `-g` | **Generate a random password** (mutually exclusive with `-p`); shown, then Enter starts encrypting |
+| `--no-decoy` / `--single-slot` | Write a single slot, ~1x the size (default 2x). The trade-off is that the size reveals "no decoy" |
+| `--gen` / `-g` | **Generate a random password** (encryption only; mutually exclusive with `-p`); shown, then Enter starts encrypting |
 | `--gen-len <n>` | Generated password length, 4-128, default 20 |
-| `--gen-sets <list>` | Character classes: `upper,lower,digits,symbols` (all by default) |
-| `--delete` / `-D <files...>` | **Secure delete**: only deletes, no encrypt/decrypt; multiple files allowed, pass count via `-w` |
-| `--check-update` / `-U` | **Check for updates**: downloads the published build and compares hashes; exit code `0`=up to date, `2`=update available, `1`=error |
-| `--lang <zh\|en>` | Output language, default `en`. Use `--lang zh` for Chinese |
+| `--gen-sets <list>` | Character classes: `upper,lower,digits,symbols` (comma-separated, spaces ignored; all by default) |
+| `--delete` / `-D <files...>` | **Secure delete**: only deletes, no encrypt/decrypt; multiple files allowed, pass count via `-w` (`0` = no overwriting) |
+| `--check-update` / `-U` | **Check for updates** (no input file needed): downloads the published build and compares hashes; exit code `0`=up to date, `2`=update available, `1`=error |
+| `-L` / `--lang <zh\|en>` | Output language, default `en`. Use `--lang zh` for Chinese (`zh-cn` / `cn` / `chinese` / `english` are also accepted) |
 | `-h` / `--help` | Show help |
 
-> Output names are derived automatically: `.enc` is appended when encrypting and removed when decrypting.
+> Output names are derived automatically: `.enc` is appended when encrypting and removed when decrypting;
+> a file being decrypted must end in `.enc`, otherwise it is an error.
 >
-> As in the GUI, `-w 0` corresponds to "keep source files after encrypting/decrypting" — it means
-> **keep**, not delete.
+> `-w` means different things per mode: when encrypting/decrypting, `0` = **keep the source** (same as
+> `-k`); in `--delete` mode, `0` = **delete without overwriting**.
 >
-> `--decoy` and `--decoy-pass` **must be given together**, and the fake password must differ from the
-> real one; the fake password only exists to be handed over under coercion.
+> After decryption the encrypted file is always deleted **without overwriting** (the ciphertext holds no
+> plaintext residue); only `-k` or `-w 0` keeps it, and `-w` greater than 0 has no overwrite effect on decrypt.
+>
+> Exit codes: `0` = success, `1` = any file failed or bad arguments; `--check-update` also uses `2` for "update available".
+>
+> `--delete` returns exit code `1` if any of the given files fails.
+>
+> `--decoy` and `--decoy-pass` **must be given together**, the decoy file must exist, and the fake password must differ from the
+> real one; `--no-decoy` (single slot) cannot be combined with `--decoy`.
+> The fake password only exists to be handed over under coercion.
 >
 > `--no-decoy` **sacrifices deniability** (the file size itself reveals there is no decoy);
 > only use it when you are sure you do not need the decoy feature.
@@ -394,7 +432,7 @@ enc secret.txt -p mypass -t 5 -x lock -l 7
 * In **GUI decryption** the password dialog shows `X attempts left` in red; a wrong password
   decrements the counter and re-prompts
 * In **CLI decryption** the interactive prompt reads `Password (X attempts left)`; with `-p`, a
-  failure prints the remaining count
+  failure prints `Wrong password.` followed by the remaining count
 * While locked, **even the correct password is rejected**, with the remaining lock time shown
 * After the lock expires, the first decryption resets the counter to its initial value
 
@@ -442,7 +480,7 @@ opens the real content.
 
 **What it does not do**:
 
-* **Limited "existence" deniability**: the file is about 2x the plaintext, so structurally there are
+* **Limited "existence" deniability**: the file is about 2x the plaintext by default, so structurally there are
   two ciphertext segments. A knowledgeable person can infer "there may be a second payload here".
   A true hidden volume stores the second payload in unallocated space; **this is not a hidden volume**
 * If the attacker **knows both passwords**, both payloads can be decrypted
@@ -452,8 +490,8 @@ opens the real content.
 
 > **If you are sure you do not need the decoy**, check "Disable decoy" in Settings (CLI:
 > `--no-decoy`). Only one slot is written and **the file drops to about 1x the size**.
-> The trade-off is exactly the first point above — a single-slot file is 1x and a dual-slot file is
-> 2x, so **the size itself reveals that there is no decoy**. You trade indistinguishability for size.
+> The trade-off is exactly the first point above — a single-slot file is about 1x and a dual-slot file
+> is about 2x, so **the size itself reveals that there is no decoy**. You trade indistinguishability for size.
 > With this enabled the password dialog no longer offers the decoy option.
 
 ### Batch examples
@@ -475,11 +513,12 @@ Get-ChildItem *.txt | ForEach-Object { .\enc.exe $_.FullName -p mypass -o .\encr
 * The CLI and GUI use **exactly the same algorithms and file format** (AES-256-GCM + PBKDF2), so
   files encrypted by one can be **decrypted by the other**
 * **Deletion policy** (GUI: in Settings; CLI: `-k` / `-w`)
-  * Encrypt: the source contains plaintext, so it is overwritten 1 or 3 times and deleted; choosing
-    "off", `-k` or `-w 0` **keeps the source**
+  * Encrypt: the source contains plaintext, so the GUI overwrites it 1-3 times (CLI: `-w`, 1-10) and
+    deletes it; choosing "off", `-k` or `-w 0` **keeps the source**
   * Decrypt: the encrypted file is ciphertext with no plaintext residue, so **no overwriting** — it
     is deleted directly; "off", `-k` or `-w 0` **keeps it**
-* On SSDs, cloud-synced folders and similar media, overwriting cannot guarantee 100% unrecoverability
+* Overwrite limits (SSD, full-disk encryption, copy-on-write file systems, cloud sync) are covered
+  under "Secure delete" above
 * Prefer local, non-synced folders and assess the risk yourself
 * **Keep your password safe — without it the file cannot be decrypted** (AES-256-GCM has no backdoor
   and no recovery mechanism)

@@ -6,7 +6,6 @@
 #include <bcrypt.h>     // Windows CNG：系统自带的密码学实现
 
 #include <ctime>
-#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -18,6 +17,13 @@
 #pragma comment(lib, "bcrypt.lib")
 
 namespace fe {
+
+// 显示用语言开关（默认中文；见 file_crypto.h）。只影响 FormatDuration / ConsumeAttempt 的文案，
+// 不参与文件格式、密钥派生或任何安全逻辑。
+static bool g_cryptoMessagesEnglish = false;
+
+void SetCryptoMessagesEnglish(bool en) { g_cryptoMessagesEnglish = en; }
+
 namespace {
 
 struct HandleGuard {
@@ -687,20 +693,30 @@ std::string FormatDuration(uint64_t seconds) {
     const uint64_t hours = (seconds % 86400) / 3600;
     const uint64_t mins = (seconds % 3600) / 60;
     std::string s;
-    if (days > 0)  s += std::to_string(days) + " 天 ";
-    if (hours > 0) s += std::to_string(hours) + " 小时 ";
-    if (days == 0 && mins > 0) s += std::to_string(mins) + " 分钟";
-    if (s.empty()) s = "不到 1 分钟";
+    if (g_cryptoMessagesEnglish) {
+        // 英文用紧凑写法：3d 2h / 23h 59min
+        if (days > 0)  s += std::to_string(days) + "d ";
+        if (hours > 0) s += std::to_string(hours) + "h ";
+        if (days == 0 && mins > 0) s += std::to_string(mins) + "min";
+        if (s.empty()) s = "less than a minute";
+    } else {
+        if (days > 0)  s += std::to_string(days) + " 天 ";
+        if (hours > 0) s += std::to_string(hours) + " 小时 ";
+        if (days == 0 && mins > 0) s += std::to_string(mins) + " 分钟";
+        if (s.empty()) s = "不到 1 分钟";
+    }
     while (!s.empty() && s.back() == ' ') s.pop_back();
     return s;
 }
 
 int ConsumeAttempt(const std::wstring& path, const FileState& st, std::string& outMsg) {
     if (!st.isProtected) return -1;
+    const bool en = g_cryptoMessagesEnglish;
 
     // 之前已锁定且尚未到期，不重复扣减
     if (st.lockUntil != 0 && NowUnix() < st.lockUntil) {
-        outMsg = "已锁定，剩余 " + FormatDuration(st.lockUntil - NowUnix());
+        outMsg = en ? ("Locked; " + FormatDuration(st.lockUntil - NowUnix()) + " remaining")
+                    : ("已锁定，剩余 " + FormatDuration(st.lockUntil - NowUnix()));
         return 0;
     }
 
@@ -709,19 +725,23 @@ int ConsumeAttempt(const std::wstring& path, const FileState& st, std::string& o
 
     if (remaining > 0) {
         WriteMutableState(path, remaining, 0);
-        outMsg = "还可尝试 " + std::to_string(remaining) + " 次";
+        outMsg = en ? (std::to_string(remaining) + " attempt(s) left")
+                    : ("还可尝试 " + std::to_string(remaining) + " 次");
         return remaining;
     }
 
     if (st.action == EXHAUST_LOCK) {
         const uint64_t until = NowUnix() + (uint64_t)st.lockDays * 86400ULL;
         WriteMutableState(path, 0, until);
-        outMsg = "错误次数已达上限，已禁止解密 " + std::to_string(st.lockDays) + " 天";
+        outMsg = en ? ("Too many wrong attempts; decryption is blocked for "
+                       + std::to_string(st.lockDays) + " day(s)")
+                    : ("错误次数已达上限，已禁止解密 " + std::to_string(st.lockDays) + " 天");
         return 0;
     }
 
     DeleteFileW(path.c_str());
-    outMsg = "错误次数已达上限，加密文件已被永久删除";
+    outMsg = en ? "Too many wrong attempts; the encrypted file was deleted permanently"
+                : "错误次数已达上限，加密文件已被永久删除";
     return 0;
 }
 

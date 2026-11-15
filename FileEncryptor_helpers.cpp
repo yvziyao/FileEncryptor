@@ -37,7 +37,5 @@ void UpdateLanguageUI() {
 		SetWindowTextW(g_hBtn3, tr(L"安全删除", L"Secure delete").c_str());
 		InvalidateRect(g_hBtn3, NULL, FALSE);
 	}
-	// 状态栏文本也跟着切换（保持当前状态，回到“就绪”语义）
-	SetStatusText(tr(L"就绪", L"Ready"));
 	if (g_mainWnd) InvalidateRect(g_mainWnd, NULL, FALSE);
 }

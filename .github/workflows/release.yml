@@ -1,0 +1,84 @@
+﻿name: Release - Build and publish
+
+# 打 tag（v*）时自动构建三个产物并发布到 GitHub Releases；
+# 也可以在 Actions 页面手动触发（workflow_dispatch）。
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0). Leave empty to just build artifacts.'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v1
+
+      # build_setup.cmd 会依次构建 GUI(MSBuild) -> CLI(cl) -> 安装程序(rc + cl)。
+      # 它内部已经调用了 vcvars64.bat 定位工具链。
+      - name: Build GUI + CLI + installer (Release x64)
+        shell: cmd
+        run: build_setup.cmd
+
+      - name: Verify artifacts
+        shell: pwsh
+        run: |
+          $want = @(
+            'x64\Release\FileEncryptor.exe',
+            'x64\Release\enc.exe',
+            'x64\Release\FileEncryptorSetup.exe'
+          )
+          $missing = $want | Where-Object { -not (Test-Path $_) }
+          if ($missing) { throw "Missing artifacts: $($missing -join ', ')" }
+          Get-Item $want | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+          # 附带 sha256，方便用户核对（与程序内「检查更新」的比对口径一致）
+          Get-FileHash $want -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $($_.Path)" } | Write-Host
+          Get-FileHash $want -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -Path x64\Release\SHA256SUMS.txt -Encoding ascii
+
+      # MSIX（商店/侧载用）。Publisher 需先替换成 Partner Center 的发布者 ID，
+      # 否则只能本地侧载、不能上架。
+      - name: Build MSIX
+        shell: pwsh
+        run: ./msix/build_msix.ps1
+
+      # 每次都上传 build artifact：手动触发时没有 tag 也能拿到产物
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileEncryptor-Release-x64
+          path: |
+            x64/Release/FileEncryptor.exe
+            x64/Release/enc.exe
+            x64/Release/FileEncryptorSetup.exe
+            x64/Release/SHA256SUMS.txt
+            x64/msix/FileEncryptor.msix
+          if-no-files-found: error
+
+      # 打 tag 时发布 Release（GitHub 只是镜像渠道，主渠道仍是 Gitee）
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          generate_release_notes: true
+          files: |
+            x64/Release/FileEncryptor.exe
+            x64/Release/enc.exe
+            x64/Release/FileEncryptorSetup.exe
+            x64/Release/SHA256SUMS.txt
+            x64/msix/FileEncryptor.msix

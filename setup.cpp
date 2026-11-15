@@ -18,7 +18,6 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <string>
-#include <vector>
 
 #include "setup_res.h"
 

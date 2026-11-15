@@ -74,9 +74,15 @@ VerifyResult VerifyPassword(const std::wstring& path, const std::string& passwor
 
 // 一次解密失败后调用：扣减次数，必要时执行后果（锁定 / 永久删除）。
 // 返回扣减后的剩余次数；-1 表示未启用保护。
+// outMsg 已按 SetCryptoMessagesEnglish() 的设置本地化。
 int ConsumeAttempt(const std::wstring& path, const FileState& st, std::string& outMsg);
 
-// 把秒数格式化成中文时长（"3 天 2 小时"）
+// 显示用语言开关：只影响 FormatDuration() 与 ConsumeAttempt() 的提示文字。
+// 默认 false = 中文（GUI 不调用时行为完全不变）；CLI 解析完 --lang 后设为 !g_zh。
+// 不参与文件格式、密钥派生或任何安全逻辑，切换语言不会改变密文/文件头。
+void SetCryptoMessagesEnglish(bool en);
+
+// 把秒数格式化成本地化时长（中文 "3 天 2 小时" / 英文 "3d 2h"）
 std::string FormatDuration(uint64_t seconds);
 
 // 删除文件。passes = 0 直接删除；passes >= 1 先用随机数据覆写 N 遍再删除。

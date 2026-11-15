@@ -21,9 +21,6 @@
     <ClCompile Include="winui_password.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="winrt_init.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="FileEncryptor_helpers.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -36,21 +33,18 @@
     <ClCompile Include="winui_dialog.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="file_crypto.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="update_check.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="WindowsAppSDK-VersionInfo.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="packages\Microsoft.WindowsAppSDK.ML.2.1.74\include\WindowsAppSDK-VersionInfo.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="winui_password.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="winrt_init.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="FileEncryptor_helpers.h">
@@ -65,6 +59,15 @@
     <ClInclude Include="winui_dialog.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="file_crypto.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="file_format.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="update_check.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc">
@@ -73,11 +76,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
-    <None Include="NewFileEncryptor.vcxproj" />
     <None Include="README.md" />
     <None Include=".github\workflows\ci.yml" />
     <None Include=".gitignore" />
     <None Include="LICENSE" />
-    <None Include=".github\workflows\release.yml" />
   </ItemGroup>
 </Project>

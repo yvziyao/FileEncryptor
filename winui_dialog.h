@@ -1,4 +1,4 @@
-// winui_dialog.h - WinUI 3 风格的自绘模态对话框层（密码框 / 消息框统一实现）。
+﻿// winui_dialog.h - WinUI 3 风格的自绘模态对话框层（密码框 / 消息框统一实现）。
 //
 // 全部在**本进程内**创建，因此可以：
 //   * 与主窗口共用同一份语言状态（g_langEnglish / tr()），实现全局中英切换；
@@ -26,6 +26,11 @@ struct UiMessage {
     // 可选：一段单独用只读编辑框显示的文字（可选中、可 Ctrl+C 复制）。
     // 随机生成的密码必须让用户能复制走，画成普通文字是选不中的。
     std::wstring selectable;
+
+    // 可选：「不再提示」复选框（checkText 非空时显示在按钮行上方）。
+    // checkInOut 既给初始勾选状态，也在窗口关闭后回填最终状态。
+    std::wstring checkText;
+    bool*        checkInOut = nullptr;
 };
 
 // 返回值：IDOK / IDYES / IDNO / IDCANCEL
@@ -72,7 +77,7 @@ struct UiSettingsData {
     int          theme = 0;          // 0=跟随系统 1=浅色 2=深色
     int          outDir = 0;         // 0=源文件同目录 1=指定目录 2=每次都询问
     std::wstring fixedDir;           // outDir==1 时生效
-    int          secureDelete = 3;   // 0=禁用 1=覆写1次 3=覆写3次
+    int          secureDelete = 3;   // 覆写次数 1..3（设置面板只提供 1/2/3 三档，没有“禁用”）
 
     int          strength = 1;       // 0=快速 1=标准 2=安全 3=极强
     int          decoyDisabled = 0;  // 1=不写第二个槽，体积约 1 倍（放弃不可区分性）

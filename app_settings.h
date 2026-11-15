@@ -1,4 +1,4 @@
-// app_settings.h - 应用设置模型与持久化（HKCU\Software\FileEncryptor）。
+﻿// app_settings.h - 应用设置模型与持久化（HKCU\Software\FileEncryptor）。
 #pragma once
 
 #include <windows.h>
@@ -17,10 +17,11 @@ struct AppSettings {
     ThemeMode        theme = ThemeMode::System;
     OutDirMode       outDir = OutDirMode::SourceDir;
     std::wstring     fixedOutDir;
-    // 安全删除覆写次数，1-10。设置面板里是个数字输入框。
+    // 安全删除覆写次数，1-3（设置面板里是 1/2/3 三档；CLI 的 -w 允许 0-10）。
+    // 注意与 keepSource 分开：勾「保留源文件」时用 keepSource，而不是把这里设成 0。
     int              secureDelete = 3;
     // 加密/解密后保留源文件（不删除）。与覆写次数分开，
-    // 否则「不删除」这个选项在 1-10 的范围里没有位置。
+    // 否则「不删除」这个选项在 1-3 的范围里没有位置。
     bool             keepSource = false;
     // 是否在资源管理器右键菜单中显示（关闭时会删除已注册的菜单项）
     bool             shellMenu = true;
@@ -42,6 +43,9 @@ struct AppSettings {
     // 安全删除的实测吞吐（KB/s）。用于确认框里估算预计时长；
     // 每次真正删完一批文件后按实测值做指数平滑更新。
     int              delKBps = 256000;   // 默认按 250 MB/s 估
+
+    // 「检查更新」前那条 Store 提示：用户在弹窗里勾了「不再提示」就置 1
+    int              updateWarnSkip = 0;
 };
 
 // 语言是否用英文：System 按系统 UI 语言判断（非中文系统一律用英文）
@@ -62,5 +66,4 @@ StrengthMode StrengthFromIterations(unsigned int iterations);
 std::wstring StrengthName(StrengthMode s);
 std::wstring ThemeName(ThemeMode t);
 std::wstring OutDirName(OutDirMode d);
-std::wstring SecureDeleteName(int passes);
 

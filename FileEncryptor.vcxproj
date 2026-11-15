@@ -151,7 +151,6 @@
     <ClCompile Include="FileEncryptor.cpp" />
     <ClCompile Include="FileEncryptor_helpers.cpp" />
     <ClCompile Include="ui_theme.cpp" />
-    <ClCompile Include="winrt_init.cpp" />
     <ClCompile Include="winui_dialog.cpp" />
     <ClCompile Include="winui_password.cpp" />
     <ClCompile Include="update_check.cpp" />
@@ -163,7 +162,6 @@
     <ClInclude Include="FileEncryptor_helpers.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="ui_theme.h" />
-    <ClInclude Include="winrt_init.h" />
     <ClInclude Include="winui_dialog.h" />
     <ClInclude Include="winui_password.h" />
     <ClInclude Include="update_check.h" />
@@ -173,10 +171,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include=".github\workflows\ci.yml" />
-    <None Include=".github\workflows\release.yml" />
     <None Include=".gitignore" />
     <None Include="LICENSE" />
-    <None Include="NewFileEncryptor.vcxproj" />
     <None Include="packages.config" />
     <None Include="README.md" />
   </ItemGroup>
