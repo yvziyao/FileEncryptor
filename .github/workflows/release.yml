@@ -67,6 +67,16 @@ jobs:
             x64/msix/FileEncryptor.msix
           if-no-files-found: error
 
+      # 同步到 Gitee（主渠道）。需要仓库 Secrets 里配置 GITEE_TOKEN；
+      # 没配就自动跳过，continue-on-error 保证 Gitee 出问题不会影响 GitHub 发布。
+      - name: Mirror to Gitee
+        if: startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: ./scripts/gitee_release.ps1 -Tag ${{ github.ref_name }}
+
       # 打 tag 时发布 Release（GitHub 只是镜像渠道，主渠道仍是 Gitee）
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
