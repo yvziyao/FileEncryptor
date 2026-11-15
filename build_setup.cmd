@@ -1,24 +1,62 @@
 @echo off
-rem build_setup.cmd - build the "standard" (installed) edition: FileEncryptorSetup.exe
+rem build_setup.cmd - build all three targets (GUI, CLI, installer).
 rem
 rem Order matters: setup.rc embeds the two exes from x64\Release as RCDATA,
 rem so they must be built first or rc.exe will fail to find them.
 rem
 rem NOTE: keep this file ASCII-only. cmd.exe parses batch files with the OEM
 rem code page (936 on zh-CN), so UTF-8 Chinese comments corrupt the script.
+rem
+rem Visual Studio is located with vswhere.exe (ships with every VS 2017+),
+rem with fallbacks for hand-installed layouts. Do NOT hardcode a machine path
+rem here: this script also runs on GitHub Actions runners.
 setlocal
 cd /d "%~dp0"
 
-echo === 1) build GUI and CLI ===
-call "D:\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+set "VSDIR="
+
+rem --- 1) vswhere (most reliable) ---------------------------------------
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%VSWHERE%" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+if exist "%VSWHERE%" (
+    for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * ^
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 ^
+        -property installationPath 2^>nul`) do set "VSDIR=%%i"
+)
+
+rem --- 2) fallback: probe common install roots --------------------------
+if not defined VSDIR call :probe "%ProgramFiles%\Microsoft Visual Studio"
+if not defined VSDIR call :probe "%ProgramFiles(x86)%\Microsoft Visual Studio"
+if not defined VSDIR call :probe "D:\Microsoft Visual Studio"
+if not defined VSDIR call :probe "C:\Microsoft Visual Studio"
+
+if not defined VSDIR (
+    echo ERROR: Visual Studio with the C++ toolset was not found.
+    echo        Install "Desktop development with C++" or set VSDIR manually.
+    exit /b 1
+)
+if not exist "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" (
+    echo ERROR: vcvars64.bat not found under "%VSDIR%".
+    exit /b 1
+)
+set "MSBUILD=%VSDIR%\MSBuild\Current\Bin\MSBuild.exe"
+if not exist "%MSBUILD%" set "MSBUILD=%VSDIR%\MSBuild\15.0\Bin\MSBuild.exe"
+if not exist "%MSBUILD%" (
+    echo ERROR: MSBuild.exe not found under "%VSDIR%".
+    exit /b 1
+)
+echo Using Visual Studio: %VSDIR%
+
+echo === 0) set up the compiler environment ===
+call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 if errorlevel 1 (
-    echo vcvars64.bat not found - check the Visual Studio path
+    echo ERROR: vcvars64.bat failed
     exit /b 1
 )
 
+echo === 1) build the GUI (MSBuild) ===
 taskkill /f /im FileEncryptor.exe >nul 2>&1
-"D:\Microsoft Visual Studio\18\Insiders\MSBuild\Current\Bin\MSBuild.exe" ^
-    FileEncryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal /nologo
+"%MSBUILD%" FileEncryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal /nologo
 if errorlevel 1 (
     echo GUI build failed
     exit /b 1
@@ -68,3 +106,14 @@ echo.
 echo done: x64\Release\FileEncryptorSetup.exe
 dir /b "x64\Release\FileEncryptorSetup.exe"
 endlocal
+exit /b 0
+
+rem --- helper: find <root>\<VS version>\<edition> -----------------------
+:probe
+if not exist "%~1" exit /b 0
+for /d %%v in ("%~1\*") do (
+    for /d %%e in ("%%v\*") do (
+        if exist "%%e\VC\Auxiliary\Build\vcvars64.bat" if not defined VSDIR set "VSDIR=%%e"
+    )
+)
+exit /b 0

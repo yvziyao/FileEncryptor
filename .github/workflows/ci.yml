@@ -16,11 +16,19 @@ jobs:
     - name: Setup Visual Studio environment
       uses: microsoft/setup-msbuild@v1
 
-    - name: Restore NuGet packages
-      run: nuget restore FileEncryptor.vcxproj
-
+    # No NuGet dependencies (everything comes from Windows/VC++). Using the repo
+    # build script keeps CI on the same path as local builds (GUI + CLI + installer).
     - name: Build (Release x64)
-      run: msbuild FileEncryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+      shell: cmd
+      run: build_setup.cmd
+
+    - name: Verify artifacts
+      shell: pwsh
+      run: |
+        $want = @('x64\Release\FileEncryptor.exe','x64\Release\enc.exe','x64\Release\FileEncryptorSetup.exe')
+        $missing = $want | Where-Object { -not (Test-Path $_) }
+        if ($missing) { throw "Missing artifacts: $($missing -join ', ')" }
+        Get-Item $want | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
 
     - name: Upload artifact
       if: success()
