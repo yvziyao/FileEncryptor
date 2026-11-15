@@ -3,7 +3,7 @@
 
   用法：
       powershell -ExecutionPolicy Bypass -File msix\build_msix.ps1
-      powershell -ExecutionPolicy Bypass -File msix\build_msix.ps1 -Version 1.0.0.0
+      powershell -ExecutionPolicy Bypass -File msix\build_msix.ps1 -Version 1.0.1.0
 
   产出：x64\msix\FileEncryptor.msix（已用本地自签名证书签名，可直接侧载测试）
 
@@ -13,7 +13,7 @@
      但 Publisher 必须与商店账号一致，否则包会被拒绝。
 #>
 param(
-    [string]$Version = "1.0.0.0",
+    [string]$Version = "1.0.1.0",
     [string]$CertPassword = "FileEncryptorMsix"
 )
 

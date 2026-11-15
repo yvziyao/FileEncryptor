@@ -19,8 +19,11 @@
             Version="1.0.0.0"
             ProcessorArchitecture="x64" />
 
+  <!-- DisplayName 必须是 Partner Center 里**已保留**的应用名称（这里是
+       "FileEncryptor Tool"），写成别的会报
+       "清单使用了你未保留的显示名称"。 -->
   <Properties>
-    <DisplayName>FileEncryptor</DisplayName>
+    <DisplayName>FileEncryptor Tool</DisplayName>
     <PublisherDisplayName>虞子尧</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>基于 AES-256-GCM 与 PBKDF2 的文件加密工具，支持可否认加密与安全删除。</Description>
@@ -43,7 +46,7 @@
     <Application Id="App" Executable="FileEncryptor.exe"
                  EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-          DisplayName="FileEncryptor"
+          DisplayName="FileEncryptor Tool"
           Description="基于 AES-256-GCM 与 PBKDF2 的文件加密工具"
           BackgroundColor="transparent"
           Square150x150Logo="Assets\Square150x150Logo.png"
