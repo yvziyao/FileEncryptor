@@ -255,10 +255,10 @@ build_setup.cmd
 - **MSIX**（`msix/`）：`msix\build_msix.ps1` 会生成商店图标、打包并（本地）签名，
   产出 `x64\msix\FileEncryptor.msix`。
 
-> ⚠️ **上架 Microsoft Store 前必须**把 `msix/AppxManifest.xml` 里的
-> `Publisher` 换成 Partner Center 给出的「发布者 ID」（形如 `CN=8B1A...`）。
-> 商店 Product ID（`9PK12VV60DDN`）只用于商店链接，与包标识无关；
-> `Identity Name` 用的是 MSIX 包标识名 `7C5755A7.FileEncryptorTool`。
+> `Publisher` 已填入 Partner Center 的发布者 ID（`CN=E32D2E7E-...`）；
+> 若商店账号变更需同步修改。商店 Product ID（`9PK12VV60DDN`）只用于商店链接，
+> 与包标识无关；`Identity Name` 是 MSIX 包标识名 `7C5755A7.FileEncryptorTool`。
+> 本地签名用的是自动生成的自签名证书，商店会自行重签，不影响上传。
 
 ### 检查更新
 

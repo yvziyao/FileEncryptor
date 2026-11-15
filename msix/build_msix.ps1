@@ -138,4 +138,4 @@ Write-Host ("大小: " + [Math]::Round($item.Length / 1KB) + " KB")
 Write-Host ("SHA256: " + (Get-FileHash $msixOut -Algorithm SHA256).Hash)
 Write-Host ""
 Write-Host "侧载安装: Add-AppxPackage -Path ""$msixOut"""
-Write-Host "商店上传: Partner Center → 提交 → 包 → 上传该 .msix（先替换 Publisher）"
+Write-Host "商店上传: Partner Center → 提交 → 包 → 上传该 .msix"

@@ -268,10 +268,11 @@ It builds the GUI and CLI first, then embeds both exes as `RCDATA` via `setup.rc
 - **MSIX** (`msix/`): `msix\build_msix.ps1` generates the Store art, packs and (locally) signs
   `x64\msix\FileEncryptor.msix`.
 
-> **Before submitting to the Microsoft Store** replace `Publisher` in
-> `msix/AppxManifest.xml` with the Partner Center publisher ID (looks like `CN=8B1A...`).
-> The Store Product ID (`9PK12VV60DDN`) is only used for the Store link and is unrelated to the
-> package identity; `Identity Name` is the MSIX package name `7C5755A7.FileEncryptorTool`.
+> `Publisher` is already set to the Partner Center publisher ID (`CN=E32D2E7E-...`); update it if
+> the Store account changes. The Store Product ID (`9PK12VV60DDN`) is only used for the Store link
+> and is unrelated to the package identity; `Identity Name` is the MSIX package name
+> `7C5755A7.FileEncryptorTool`. Local signing uses an auto-generated self-signed certificate --
+> the Store re-signs the package, so this does not affect upload.
 
 ### Checking for updates
 

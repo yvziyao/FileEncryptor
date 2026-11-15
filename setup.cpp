@@ -494,7 +494,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
         HDC dc = GetDC(hwnd);
-        const int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+        int dpi = GetDeviceCaps(dc, LOGPIXELSY);
         ReleaseDC(hwnd, dc);
         auto px = [&](int v) { return MulDiv(v, dpi, 96); };
 
@@ -652,7 +652,13 @@ int RunWindow(HINSTANCE inst, const wchar_t* cls, WNDPROC proc, int cw, int ch,
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     RegisterClassExW(&wc);
 
-    RECT rc = { 0, 0, cw, ch };
+    // 清单里声明了 dpiAware，WM_CREATE 里所有控件坐标都按 DPI 缩放；
+    // 客户区尺寸也必须跟着缩放，否则 125% / 150% 缩放下控件会超出窗口被裁掉
+    //（这就是"大缩放下显示不全"的原因）。
+    HDC screen = GetDC(NULL);
+    int dpi = screen ? GetDeviceCaps(screen, LOGPIXELSY) : 96;
+    if (screen) ReleaseDC(NULL, screen);
+    RECT rc = { 0, 0, MulDiv(cw, dpi, 96), MulDiv(ch, dpi, 96) };
     AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
     HWND hwnd = CreateWindowExW(0, cls, caption.c_str(),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
@@ -694,7 +700,7 @@ LRESULT CALLBACK MaintProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
         HDC dc = GetDC(hwnd);
-        const int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+        int dpi = GetDeviceCaps(dc, LOGPIXELSY);
         ReleaseDC(hwnd, dc);
         auto px = [&](int v) { return MulDiv(v, dpi, 96); };
         const HFONT fTitle = CreateFontW(-px(18), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,

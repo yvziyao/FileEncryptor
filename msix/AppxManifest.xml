@@ -2,11 +2,8 @@
 <!--
   FileEncryptor 的 MSIX 清单（用于 Microsoft Store 提交 / 侧载）。
 
-  ⚠️ 提交到 Store 之前必须替换 Publisher：
-     Partner Center → 产品 → 产品标识 → 「包/标识名」与「发布者 ID」。
-     Publisher 形如 CN=8B1A2C3D-....（不是商店 Product ID，也不是 Package Name）。
-     下面留了占位符 REPLACE_WITH_PARTNER_CENTER_PUBLISHER，未替换时
-     Store 会拒绝该包（错误 0x80073CF9 / Publisher 不匹配）。
+  Publisher 来自 Partner Center → 产品 → 产品标识 →「发布者 ID」。
+  注意它不是商店 Product ID（9PK12VV60DDN），也不是下面的包标识名。
 
   Identity/Name 用的是 MSIX 包标识名（PublisherId.AppName），
   商店 Product ID 9PK12VV60DDN 只用于商店链接，与这里无关。
@@ -18,7 +15,7 @@
     IgnorableNamespaces="uap rescap">
 
   <Identity Name="7C5755A7.FileEncryptorTool"
-            Publisher="CN=REPLACE_WITH_PARTNER_CENTER_PUBLISHER"
+            Publisher="CN=E32D2E7E-BEF0-4FD4-9E1C-223A58045E08"
             Version="1.0.0.0"
             ProcessorArchitecture="x64" />
 
