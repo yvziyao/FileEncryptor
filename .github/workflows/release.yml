@@ -50,9 +50,35 @@ jobs:
 
       # MSIX（商店/侧载用）。Publisher 需先替换成 Partner Center 的发布者 ID，
       # 否则只能本地侧载、不能上架。
+      # 包版本必须跟着 tag 走：Microsoft Store 会拒绝重复或低于已发布版本的包，
+      # 写死 1.0.0.0 的话第二次提交必然失败。
       - name: Build MSIX
         shell: pwsh
-        run: ./msix/build_msix.ps1
+        run: |
+          $v = "${{ github.ref_name }}" -replace '^v', ''
+          if ($v -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Host "tag 不是 vX.Y.Z 形式，MSIX 版本回退为 1.0.0.0"
+            $v = '1.0.0'
+          }
+          ./msix/build_msix.ps1 -Version "$v.0"
+
+      # 商店/侧载包的签名与结构自检（自签名证书不受信任是预期的，商店会重签）
+      - name: Sanity-check MSIX
+        shell: pwsh
+        run: |
+          $f = 'x64/msix/FileEncryptor.msix'
+          if (-not (Test-Path $f)) { throw "MSIX was not produced" }
+          Copy-Item $f 'x64/msix/pkg.zip'
+          Expand-Archive 'x64/msix/pkg.zip' 'x64/msix/unpacked' -Force
+          [xml]$m = Get-Content 'x64/msix/unpacked/AppxManifest.xml' -Raw
+          $min = $m.Package.Dependencies.TargetDeviceFamily.MinVersion
+          $ver = $m.Package.Identity.Version
+          Write-Host "manifest Identity/@Version = $ver ; MinVersion = $min"
+          if ([version]$min -le [version]'10.0.17134.0') { throw "MinVersion $min is rejected by the Store" }
+          foreach ($a in @('Assets/StoreLogo.png','Assets/Square44x44Logo.png','Assets/Square150x150Logo.png')) {
+            if (-not (Test-Path "x64/msix/unpacked/$a")) { throw "missing asset $a" }
+          }
+          Write-Host "MSIX layout OK"
 
       # 每次都上传 build artifact：手动触发时没有 tag 也能拿到产物
       - name: Upload build artifacts

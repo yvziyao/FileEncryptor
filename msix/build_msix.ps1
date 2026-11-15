@@ -152,7 +152,21 @@ $manifest = Get-Content $manifestSrc -Raw -Encoding UTF8
 if ($manifest -match "REPLACE_WITH_PARTNER_CENTER_PUBLISHER") {
     Write-Warning "AppxManifest.xml 里的 Publisher 还是占位符：本地侧载没问题，但**上传商店前必须替换**。"
 }
-$manifest = $manifest -replace 'Version="\d+\.\d+\.\d+\.\d+"', "Version=`"$Version`""
+# 只替换 <Identity ...> 里的 Version 属性。
+# 不能用裸的 'Version="x.y.z.w"' 正则：它会同时匹配到 TargetDeviceFamily 里的
+# MinVersion="10.0.17763.0"（"MinVersion" 也以 "Version" 结尾），
+# 把平台最低版本错改成 1.0.0.0 —— 商店会直接拒收
+# （"不可上传面向 Windows MinVersion <= 10.0.17134.0 的程序包"）。
+$manifest = $manifest -replace '(<Identity[^>]*?\sVersion=")\d+\.\d+\.\d+\.\d+(")', "`${1}$Version`${2}"
+
+# 校验：Identity 版本已更新，且 MinVersion 仍 >= 10.0.17763.0（商店的硬性下限）
+$idVer = [regex]::Match($manifest, '<Identity[^>]*?\sVersion="([^"]+)"').Groups[1].Value
+$minVer = [regex]::Match($manifest, 'MinVersion="([^"]+)"').Groups[1].Value
+if ($idVer -ne $Version) { throw "清单 Identity/@Version 替换失败：得到 $idVer" }
+if (-not $minVer -or [version]$minVer -lt [version]"10.0.17763.0") {
+    throw "清单 MinVersion 无效（$minVer）：Microsoft Store 不接受 <= 10.0.17134.0 的包"
+}
+Write-Host ("清单版本 " + $idVer + " / 平台最低 " + $minVer)
 # 以 UTF-8（无 BOM）写出，MakeAppx 不接受带 BOM 的清单
 [System.IO.File]::WriteAllText((Join-Path $payload "AppxManifest.xml"), $manifest,
                                (New-Object System.Text.UTF8Encoding($false)))
