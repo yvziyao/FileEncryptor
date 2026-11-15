@@ -252,8 +252,11 @@ build_setup.cmd
 - **Release**（`.github/workflows/release.yml`）：打 `v*` tag 或手动触发时，自动构建
   GUI / CLI / 安装程序 + MSIX，生成 `SHA256SUMS.txt` 并发布到 GitHub Releases。
   平时只需打 tag，不用再手动编译打包。
-- **MSIX**（`msix/`）：`msix\build_msix.ps1` 会生成商店图标、打包并（本地）签名，
-  产出 `x64\msix\FileEncryptor.msix`。
+- **MSIX**（`msix/`）：`msix\build_msix.ps1` 会打包并（本地）签名，产出
+  `x64\msix\FileEncryptor.msix`。
+  商店徽标/磁贴图标是 MSIX 清单的**必填项**（Windows 不会像 MSI/EXE 那样从 exe 自动取），
+  脚本会从 `favicon.ico` 里的 256×256 帧生成 6 个尺寸；要换专门设计的商店图，
+  替换 `Assets\*.png`（脚本产物目录）即可。
 
 > `Publisher` 已填入 Partner Center 的发布者 ID（`CN=E32D2E7E-...`）；
 > 若商店账号变更需同步修改。商店 Product ID（`9PK12VV60DDN`）只用于商店链接，

@@ -55,43 +55,96 @@ foreach ($f in @($gui, $cli)) {
 }
 
 # ---------------------------------------------------------------- 2) 生成商店图标
-# 用 .NET GDI+ 画：深蓝底 + 白色 FE 字样（占位美术，商店可后续替换）
+# MSIX 的磁贴/商店图标必须由清单指定的图片文件提供（Windows 不会像
+# MSI/EXE 安装包那样自动从 exe 取图标），所以这些资源是**必需**的。
+# 这里直接从程序真实图标（favicon.ico，也就是 exe 内嵌的那个）生成，
+# 避免出现"占位美术"；以后要换成专门设计的商店图，替换 Assets\*.png 即可。
 Add-Type -AssemblyName System.Drawing
-function New-Asset([string]$path, [int]$w, [int]$h) {
-    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+
+$iconPath = Join-Path $repo "favicon.ico"
+if (-not (Test-Path $iconPath)) { throw "缺少 favicon.ico（程序图标源）" }
+
+# 直接从 ICO 里解出最大的那一帧。
+# 注意：System.Drawing.Icon 按尺寸构造时只会给到 48x48（它读不了 ICO 里的
+# 256x256 大帧），用它做 310 宽的磁贴会糊，所以这里手工解 BMP 帧。
+$srcBitmap = $null
+$ico = [System.IO.File]::ReadAllBytes($iconPath)
+if ($ico.Length -gt 6) {
+    $count = [BitConverter]::ToUInt16($ico, 4)
+    $best = $null
+    for ($i = 0; $i -lt $count; $i++) {
+        $e = 6 + $i * 16
+        $w = [int]$ico[$e]; if ($w -eq 0) { $w = 256 }
+        $h = [int]$ico[$e + 1]; if ($h -eq 0) { $h = 256 }
+        $bpp = [BitConverter]::ToUInt16($ico, $e + 6)
+        $size = [BitConverter]::ToUInt32($ico, $e + 8)
+        $off = [BitConverter]::ToUInt32($ico, $e + 12)
+        if ($bpp -ne 32) { continue }
+        if (-not $best -or ($w * $h) -gt ($best.w * $best.h)) {
+            $best = [pscustomobject]@{ w = $w; h = $h; off = $off; size = $size; bpp = $bpp }
+        }
+    }
+    if ($best) {
+        # 帧数据是 BITMAPINFOHEADER + 自下而上的 BGRA
+        $bmp = New-Object System.Drawing.Bitmap($best.w, $best.h,
+                                                [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $rowBytes = $best.w * 4
+        for ($y = 0; $y -lt $best.h; $y++) {
+            $src = $best.off + 40 + ($best.h - 1 - $y) * $rowBytes
+            for ($x = 0; $x -lt $best.w; $x++) {
+                $q = $src + $x * 4
+                $bmp.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($ico[$q + 3], $ico[$q + 2],
+                                                                      $ico[$q + 1], $ico[$q]))
+            }
+        }
+        $srcBitmap = $bmp
+        Write-Host ("图标源: favicon.ico 内 " + $best.w + "x" + $best.h + " 帧")
+    }
+}
+if (-not $srcBitmap) {
+    # 兜底：退回 .NET 能读到的尺寸
+    $srcIcon = New-Object System.Drawing.Icon($iconPath)
+    $srcBitmap = $srcIcon.ToBitmap()
+    $srcIcon.Dispose()
+    Write-Host ("图标源（兜底）: " + $srcBitmap.Width + "x" + $srcBitmap.Height)
+}
+
+function New-TileAsset([string]$path, [int]$w, [int]$h, [double]$fill, $backColor) {
+    $bmp = New-Object System.Drawing.Bitmap($w, $h, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = "AntiAlias"
-    $g.TextRenderingHint = "AntiAliasGridFit"
-    $bg = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        (New-Object System.Drawing.Rectangle(0, 0, $w, $h)),
-        [System.Drawing.Color]::FromArgb(255, 37, 99, 235),
-        [System.Drawing.Color]::FromArgb(255, 30, 64, 175), 45.0)
-    $g.FillRectangle($bg, 0, 0, $w, $h)
-    $bg.Dispose()
-    $size = [int]([Math]::Min($w, $h) * 0.42)
-    $font = New-Object System.Drawing.Font("Segoe UI", $size, [System.Drawing.FontStyle]::Bold,
-                                           [System.Drawing.GraphicsUnit]::Pixel)
-    $fmt = New-Object System.Drawing.StringFormat
-    $fmt.Alignment = "Center"; $fmt.LineAlignment = "Center"
-    $g.DrawString("FE", $font, [System.Drawing.Brushes]::White,
-                  (New-Object System.Drawing.RectangleF(0, 0, $w, $h)), $fmt)
-    $font.Dispose(); $fmt.Dispose(); $g.Dispose()
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    if ($backColor) { $g.Clear($backColor) } else { $g.Clear([System.Drawing.Color]::Transparent) }
+
+    # 等比缩放放进画布中央，留出 fill 比例的内边距
+    $box = [Math]::Min($w, $h) * $fill
+    $scale = [Math]::Min($box / $srcBitmap.Width, $box / $srcBitmap.Height)
+    $dw = [int]($srcBitmap.Width * $scale)
+    $dh = [int]($srcBitmap.Height * $scale)
+    $dx = [int](($w - $dw) / 2)
+    $dy = [int](($h - $dh) / 2)
+    $g.DrawImage($srcBitmap, $dx, $dy, $dw, $dh)
+
+    $g.Dispose()
     $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
 }
 
+$brand = [System.Drawing.Color]::FromArgb(255, 37, 99, 235)
 $assets = [ordered]@{
-    "StoreLogo.png"          = @(50, 50)
-    "Square44x44Logo.png"    = @(44, 44)
-    "Square71x71Logo.png"    = @(71, 71)
-    "Square150x150Logo.png"  = @(150, 150)
-    "Wide310x150Logo.png"    = @(310, 150)
-    "SplashScreen.png"       = @(620, 300)
+    "StoreLogo.png"         = @(50, 50, 0.86, $null)     # 商店列表：透明底
+    "Square44x44Logo.png"   = @(44, 44, 0.86, $null)     # 任务栏/开始菜单小图标
+    "Square71x71Logo.png"   = @(71, 71, 0.86, $null)
+    "Square150x150Logo.png" = @(150, 150, 0.80, $null)   # 开始菜单磁贴
+    "Wide310x150Logo.png"   = @(310, 150, 0.72, $null)   # 宽磁贴
+    "SplashScreen.png"      = @(620, 300, 0.38, $brand)  # 启动画面（实底更稳）
 }
 foreach ($k in $assets.Keys) {
-    New-Asset (Join-Path $payload "Assets\$k") $assets[$k][0] $assets[$k][1]
+    $a = $assets[$k]
+    New-TileAsset (Join-Path $payload "Assets\$k") $a[0] $a[1] $a[2] $a[3]
 }
-Write-Host "已生成 $($assets.Count) 个图标资源"
+$srcBitmap.Dispose()
+Write-Host "已从程序图标生成 $($assets.Count) 个 MSIX 图标资源"
 
 # ---------------------------------------------------------------- 3) 清单
 $manifestSrc = Join-Path $PSScriptRoot "AppxManifest.xml"

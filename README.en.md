@@ -265,8 +265,10 @@ It builds the GUI and CLI first, then embeds both exes as `RCDATA` via `setup.rc
 - **CI** (`.github/workflows/ci.yml`) runs `build_setup.cmd` on every push/PR to verify all three targets.
 - **Release** (`.github/workflows/release.yml`) builds GUI / CLI / installer + MSIX on a `v*` tag
   (or manual dispatch), writes `SHA256SUMS.txt` and publishes a GitHub Release.
-- **MSIX** (`msix/`): `msix\build_msix.ps1` generates the Store art, packs and (locally) signs
-  `x64\msix\FileEncryptor.msix`.
+- **MSIX** (`msix/`): `msix\build_msix.ps1` packs and (locally) signs `x64\msix\FileEncryptor.msix`.
+  Store logos / tile images are **required** by the MSIX manifest (unlike MSI/EXE, Windows will not
+  take them from the exe); the script derives all six sizes from the 256x256 frame inside
+  `favicon.ico`. Replace the generated PNGs if you have purpose-made Store art.
 
 > `Publisher` is already set to the Partner Center publisher ID (`CN=E32D2E7E-...`); update it if
 > the Store account changes. The Store Product ID (`9PK12VV60DDN`) is only used for the Store link
