@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <bcrypt.h>
+#include <cstdlib>
 #include <vector>
 #include <string>
 
@@ -128,7 +129,9 @@ bool HttpGetText(const wchar_t* url, std::string& body, std::wstring& err) {
 }
 
 bool HttpDownload(const wchar_t* url, const std::wstring& outPath,
-                  unsigned long long& size, std::wstring& err) {
+                  unsigned long long& size, std::wstring& err,
+                  const UpdateProgressFn& onProgress = nullptr,
+                  ULONGLONG deadline = 0) {
     size = 0;
     HttpSession s;
     std::wstring host, path; INTERNET_PORT port = 0; bool https = false;
@@ -149,9 +152,32 @@ bool HttpDownload(const wchar_t* url, const std::wstring& outPath,
         return false;
     }
 
+    // 内容长度用于算百分比（Gitee 的直链一般会给 Content-Length）
+    unsigned long long total = 0;
+    {
+        wchar_t lenBuf[64] = {};
+        DWORD lenSize = sizeof(lenBuf);
+        if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX,
+                                lenBuf, &lenSize, WINHTTP_NO_HEADER_INDEX)) {
+            total = _wcstoui64(lenBuf, nullptr, 10);
+        }
+    }
+    if (onProgress) onProgress(0);
+
     bool ok = true;
     std::vector<char> buf(64 * 1024);
     for (;;) {
+        // 整体超时：连不上网 / 服务器不响应时不能无限等下去
+        if (deadline && GetTickCount64() > deadline) {
+            CloseHandle(h);
+            WinHttpCloseHandle(req);
+            DeleteFileW(outPath.c_str());
+            err = T(L"网络超时（", L"Network timeout (") +
+                  std::to_wstring(kUpdateCheckTimeoutMs / 1000) +
+                  T(L" 秒内没有完成），请检查网络或代理设置后重试",
+                     L" s elapsed), check your connection or proxy and try again");
+            return false;
+        }
         DWORD avail = 0;
         if (!WinHttpQueryDataAvailable(req, &avail) || avail == 0) break;
         const DWORD want = (avail < buf.size()) ? avail : (DWORD)buf.size();
@@ -163,8 +189,13 @@ bool HttpDownload(const wchar_t* url, const std::wstring& outPath,
             break;
         }
         size += written;
+        if (onProgress) {
+            const int pct = total ? (int)(size * 100 / total) : 0;
+            onProgress(pct > 100 ? 100 : pct);
+        }
         if (size > 64ull * 1024 * 1024) { ok = false; break; }   // 防御
     }
+    if (ok && onProgress) onProgress(100);
     CloseHandle(h);
     WinHttpCloseHandle(req);
 
@@ -282,8 +313,9 @@ std::wstring ExtractTagName(const std::string& json) {
 
 } // namespace
 
-UpdateCheckResult CheckForUpdate() {
+UpdateCheckResult CheckForUpdate(const UpdateProgressFn& onProgress) {
     UpdateCheckResult r;
+    const ULONGLONG deadline = GetTickCount64() + kUpdateCheckTimeoutMs;
 
     wchar_t self[MAX_PATH] = {};
     GetModuleFileNameW(NULL, self, _countof(self));
@@ -314,7 +346,7 @@ UpdateCheckResult CheckForUpdate() {
     const std::wstring tmpPath =
         std::wstring(tmpDir) + L"fe_update_" + std::to_wstring(GetCurrentProcessId()) + L".exe";
 
-    if (!HttpDownload(url.c_str(), tmpPath, r.remoteSize, err)) {
+    if (!HttpDownload(url.c_str(), tmpPath, r.remoteSize, err, onProgress, deadline)) {
         r.error = err;
         return r;
     }

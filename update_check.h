@@ -11,6 +11,7 @@
 // 算 sha256 → 与本机 exe 的 sha256 比较。相同即最新，不同即有更新。
 #pragma once
 
+#include <functional>
 #include <string>
 
 // 仅用于显示（滚动更新下 tag 是固定的 v1.0.0，不参与判断）
@@ -41,5 +42,12 @@ void CleanupOldVersion();
 // 错误信息用中文还是英文（GUI 传当前界面语言；CLI 传 !g_zh）
 void UpdateCheckSetEnglish(bool en);
 
-// 同步执行（会在后台线程里调用；内部超时约 5 秒/步）
-UpdateCheckResult CheckForUpdate();
+// 进度回调：0-100，只反映"下载远端 exe"这一段（API 请求很短，不单独报）。
+using UpdateProgressFn = std::function<void(int percent)>;
+
+// 同步执行（**会阻塞**，UI 必须放到工作线程里调）。
+// 整体有超时（kUpdateCheckTimeoutMs），连不上网也会在超时后返回错误而不是一直卡住。
+UpdateCheckResult CheckForUpdate(const UpdateProgressFn& onProgress = nullptr);
+
+// 整体超时（毫秒）
+constexpr unsigned kUpdateCheckTimeoutMs = 15000;

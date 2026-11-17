@@ -16,6 +16,23 @@
 #include "file_crypto.h"   // 随机密码生成（与 CLI 共用）
 #include "update_check.h"  // 检查更新
 
+#include <atomic>
+#include <cmath>
+#include <memory>
+#include <thread>
+
+// 「检查更新」工作线程的共享状态。
+// 用 shared_ptr 共享给线程：即使用户中途关掉设置面板，线程持有的最后一个引用
+// 会在结束时释放，不会碰到已销毁的窗口（投递消息前先 IsWindow 判断）。
+struct UpdateJob {
+    std::atomic<int>  percent{0};
+    std::atomic<bool> cancel{false};
+    HWND              hwnd = nullptr;
+    UpdateCheckResult* result = nullptr;   // 堆对象，由 WM_APP_UPDATE_DONE 处理方接管
+};
+static std::shared_ptr<UpdateJob> g_updateJob;
+#define WM_APP_UPDATE_DONE (WM_APP + 5)
+
 // 当前界面是否英文（定义在主程序里，供检查更新的错误信息跟随语言）
 extern bool g_langEnglish;
 #include "FileEncryptor_helpers.h"
@@ -246,6 +263,9 @@ struct UiDlgState {
 
     // 焦点环只在"用键盘操作"时显示：鼠标点过之后隐藏（与主窗口一致）
     bool              showFocusRing = false;
+
+    // 「检查更新」进行中：把胶囊按钮画成进度环 + 百分比
+    bool              updateBusy = false;
     // 设置面板：「加密后保留源文件」复选框
     int               keepSource = 0;
     RECT              rKeepBox{}, rKeepLabel{};
@@ -1054,6 +1074,50 @@ void DrawOwnerButton(LPDRAWITEMSTRUCT pdis) {
 //   IDC_UI_SHOW       “显示密码”，自带文字
 //   IDC_UI_CHK_PROT   防暴力破解开关，只画方框（后面的说明文字由父窗口绘制，
 //                     这样它才能与次数输入框、分段控件排在同一行）
+// 画一段进度圆环（0-100）。GDI 的 Arc + 粗画笔即可，不引入额外依赖。
+static void DrawProgressRing(HDC dc, const RECT& rc, int percent,
+                             COLORREF trackColor, COLORREF fillColor, int thicknessPx) {
+    if (IsRectEmpty(&rc)) return;
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+
+    const int cx = (rc.left + rc.right) / 2;
+    const int cy = (rc.top + rc.bottom) / 2;
+    int r = ((rc.right - rc.left) < (rc.bottom - rc.top) ? (rc.right - rc.left)
+                                                         : (rc.bottom - rc.top)) / 2;
+    r -= thicknessPx / 2 + 1;
+    if (r <= 1) return;
+
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    const int oldBk = SetBkMode(dc, TRANSPARENT);
+
+    HPEN track = CreatePen(PS_SOLID, thicknessPx, trackColor);
+    HGDIOBJ oldPen = SelectObject(dc, track);
+    Ellipse(dc, cx - r, cy - r, cx + r, cy + r);
+    SelectObject(dc, oldPen);
+    DeleteObject(track);
+
+    if (percent > 0) {
+        const double pi = 3.14159265358979;
+        const double start = -pi / 2.0;                       // 12 点方向
+        const double sweep = 2.0 * pi * (percent / 100.0);
+        const int x1 = cx + (int)(r * std::cos(start));
+        const int y1 = cy + (int)(r * std::sin(start));
+        const int x2 = cx + (int)(r * std::cos(start + sweep));
+        const int y2 = cy + (int)(r * std::sin(start + sweep));
+        HPEN arcPen = CreatePen(PS_SOLID, thicknessPx, fillColor);
+        oldPen = SelectObject(dc, arcPen);
+        SetArcDirection(dc, AD_CLOCKWISE);
+        Arc(dc, cx - r, cy - r, cx + r, cy + r, x1, y1, x2, y2);
+        SetArcDirection(dc, AD_COUNTERCLOCKWISE);
+        SelectObject(dc, oldPen);
+        DeleteObject(arcPen);
+    }
+
+    SetBkMode(dc, oldBk);
+    SelectObject(dc, oldBrush);
+}
+
 // 画一个圆圈问号：鼠标悬停时由 tooltip 显示具体说明
 void DrawHelpIcon(HDC dc, const RECT& rc) {
     if (IsRectEmpty(&rc)) return;
@@ -1455,14 +1519,30 @@ void PaintSettings(HDC dc, UiDlgState* st, const RECT& rcClient) {
         }
     }
 
-    // 「检查更新」小胶囊
+    // 「检查更新」小胶囊：检查中时变成"圆环 + 百分比"
     if (!IsRectEmpty(&st->rUpdateBtn)) {
         UiDrawRoundRect(dc, st->rUpdateBtn, UiPx(6), true, c.bgAlt, true,
                         st->hotItem == 8 ? c.accent : c.border);
-        RECT ur = st->rUpdateBtn;
-        UiDrawTextLine(dc, tr(L"⟳ 检查更新", L"⟳ Check for updates"), ur,
-                       UiFont(UiPx(12), false), c.accent,
-                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (st->updateBusy) {
+            const int pct = g_updateJob ? g_updateJob->percent.load() : 0;
+            const int d = UiPx(16);
+            RECT ring = { st->rUpdateBtn.left + UiPx(10),
+                          (st->rUpdateBtn.top + st->rUpdateBtn.bottom - d) / 2,
+                          st->rUpdateBtn.left + UiPx(10) + d,
+                          (st->rUpdateBtn.top + st->rUpdateBtn.bottom - d) / 2 + d };
+            DrawProgressRing(dc, ring, pct, c.border, c.accent, UiPx(3));
+            RECT tr2 = { ring.right + UiPx(8), st->rUpdateBtn.top,
+                         st->rUpdateBtn.right - UiPx(10), st->rUpdateBtn.bottom };
+            UiDrawTextLine(dc, std::to_wstring(pct) + L"%", tr2,
+                           UiFont(UiPx(12), false), c.accent,
+                           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+        else {
+            RECT ur = st->rUpdateBtn;
+            UiDrawTextLine(dc, tr(L"⟳ 检查更新", L"⟳ Check for updates"), ur,
+                           UiFont(UiPx(12), false), c.accent,
+                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
     }
 
     // 左下角「双击赞助」：不做成独立控件，直接自绘一个低调的小胶囊
@@ -1733,6 +1813,37 @@ LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 void ApplyEditTheme(HWND edit, const UiDlgState* st, bool mask = true);
 
 // 检查更新：同步请求 Gitee API（几秒内返回），结果显示在消息框里。
+// 把检查结果画成对话框（原来写在 DoCheckUpdate 里，现在线程结束后调用）
+static void ShowUpdateResult(HWND hwnd, const UpdateCheckResult& r);
+
+// 启动后台检查：UI 不阻塞，胶囊按钮显示圆环 + 百分比
+static void StartUpdateCheck(HWND hwnd, UiDlgState* st) {
+    if (!hwnd || !st || st->updateBusy) return;
+
+    UpdateCheckSetEnglish(g_langEnglish);
+    auto job = std::make_shared<UpdateJob>();
+    job->hwnd = hwnd;
+    g_updateJob = job;
+    st->updateBusy = true;
+    st->hotItem = 0;
+    EnsureDlgAnimation(hwnd);
+    InvalidateRect(hwnd, &st->rUpdateBtn, FALSE);
+
+    std::thread([job]() {
+        auto* res = new UpdateCheckResult();
+        *res = CheckForUpdate([job](int pct) { job->percent.store(pct); });
+        if (job->cancel.load()) { delete res; return; }
+        job->result = res;
+        if (job->hwnd && IsWindow(job->hwnd)) {
+            PostMessageW(job->hwnd, WM_APP_UPDATE_DONE, 0, 0);
+        }
+        else {
+            delete res;
+            job->result = nullptr;
+        }
+    }).detach();
+}
+
 static void DoCheckUpdate(HWND hwnd, UiDlgState* st) {
     if (!hwnd) hwnd = st ? st->hwnd : nullptr;
 
@@ -1761,12 +1872,13 @@ static void DoCheckUpdate(HWND hwnd, UiDlgState* st) {
         }
     }
 
-    const HCURSOR oldCur = SetCursor(LoadCursorW(NULL, IDC_WAIT));
-    UpdateCheckSetEnglish(g_langEnglish);   // 错误信息跟随界面语言
-    UpdateCheckResult r = CheckForUpdate();
-    SetCursor(oldCur);
-    if (!hwnd) hwnd = st ? st->hwnd : nullptr;
+    // 放到工作线程里跑：原来同步执行会把消息循环卡住十几秒，
+    // 连不上网时更是长时间无响应。进度显示在胶囊按钮上。
+    StartUpdateCheck(hwnd, st);
+}
 
+// 结果对话框（原 DoCheckUpdate 的后半段）
+static void ShowUpdateResult(HWND hwnd, const UpdateCheckResult& r) {
     // 换行用字符构造，避免源码里写转义
     const std::wstring NL2(2, static_cast<wchar_t>(10));
 
@@ -2006,6 +2118,12 @@ void TickDialogAnimation(HWND hDlg, UiDlgState* st) {
 
     // 3) 设置对话框：选中底色的滑动动画
     if (st->isSettings) TickSettingsSlide(hDlg, st, dt, active);
+
+    // 4) 检查更新进行中：持续重画胶囊（进度环 / 百分比）
+    if (st->updateBusy && !IsRectEmpty(&st->rUpdateBtn)) {
+        InvalidateRect(hDlg, &st->rUpdateBtn, FALSE);
+        active = true;
+    }
 
     if (!active) {
         KillTimer(hDlg, DLG_ANIM_TIMER);
@@ -2849,7 +2967,32 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
 
+    // 检查更新（工作线程）完成：接管结果并弹出结果对话框。
+    // 注意：这里必须用 st->hwnd 对应的对话框过程，因为 worker 是把消息投递到对话框的。
+    case WM_APP_UPDATE_DONE: {
+        if (!st) break;
+        st->updateBusy = false;
+        if (st->hwnd) InvalidateRect(st->hwnd, &st->rUpdateBtn, FALSE);
+        UpdateCheckResult* r = nullptr;
+        if (g_updateJob) {
+            r = g_updateJob->result;
+            g_updateJob->result = nullptr;
+            g_updateJob.reset();
+        }
+        if (r) {
+            ShowUpdateResult(hwnd, *r);
+            delete r;
+        }
+        return 0;
+    }
+
     case WM_DESTROY:
+        if (g_updateJob) {
+            // 告诉线程别再投递消息；结果对象由线程自己释放
+            g_updateJob->cancel = true;
+            g_updateJob->hwnd = nullptr;
+            g_updateJob.reset();
+        }
         KillTimer(hwnd, DLG_ATTENTION_TIMER);
         KillTimer(hwnd, DLG_SHAKE_TIMER);
         if (st) {
