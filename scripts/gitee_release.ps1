@@ -62,16 +62,33 @@ $body = @{
     prerelease       = $false
 } | ConvertTo-Json -Compress
 
-$rel = Invoke-RestMethod -Method Post "$api/releases" `
-        -Headers @{ "Content-Type" = "application/json" } -Body $body
+try {
+    $rel = Invoke-RestMethod -Method Post "$api/releases?access_token=$token" `
+            -Headers @{ "Content-Type" = "application/json;charset=UTF-8" } -Body $body
+}
+catch {
+    # Gitee 的错误信息在响应体里，默认异常文本看不出来
+    $detail = $_.ErrorDetails.Message
+    Write-Error "创建 Gitee release 失败: $($_.Exception.Message)"
+    if ($detail) { Write-Error ("响应体: " + $detail) }
+    exit 1
+}
 Write-Host "已创建 Gitee release: $Tag (id=$($rel.id))"
 
 # ---------------------------------------------------------------- 3) 上传附件
 foreach ($f in $files) {
     $item = Get-Item $f
-    $r = Invoke-RestMethod -Method Post "$api/releases/$($rel.id)/attach_files?access_token=$token" `
-            -Form @{ file = $item }
-    Write-Host ("  已上传 " + $r.name + " (" + [Math]::Round($item.Length / 1KB) + " KB)")
+    try {
+        $r = Invoke-RestMethod -Method Post "$api/releases/$($rel.id)/attach_files?access_token=$token" `
+                -Form @{ file = $item }
+        Write-Host ("  已上传 " + $r.name + " (" + [Math]::Round($item.Length / 1KB) + " KB)")
+    }
+    catch {
+        $detail = $_.ErrorDetails.Message
+        Write-Error ("上传失败: " + $item.Name + " -> " + $_.Exception.Message)
+        if ($detail) { Write-Error ("响应体: " + $detail) }
+        exit 1
+    }
 }
 
 Write-Host "Gitee 同步完成: https://gitee.com/$Owner/$Repo/releases/tag/$Tag"
