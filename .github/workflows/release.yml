@@ -97,6 +97,24 @@ jobs:
             x64/msix/FileEncryptor.msix
           if-no-files-found: error
 
+      # 从 CHANGELOG.md 里取本次 tag 对应的章节作为发行说明
+      - name: Extract release notes
+        if: startsWith(env.REL_TAG, 'v')
+        shell: pwsh
+        run: |
+          $tag = $env:REL_TAG
+          if (-not (Test-Path CHANGELOG.md)) { "本版说明见 CHANGELOG.md" | Set-Content RELEASE_BODY.md -Encoding UTF8; exit 0 }
+          $cl = Get-Content CHANGELOG.md -Raw -Encoding UTF8
+          $pattern = '(?ms)^##\s+' + [regex]::Escape($tag) + '\b.*?(?=^##\s|\z)'
+          $m = [regex]::Match($cl, $pattern)
+          if ($m.Success) {
+            Write-Host "已从 CHANGELOG 取到 $tag 的说明"
+            $m.Value.Trim() | Set-Content RELEASE_BODY.md -Encoding UTF8
+          } else {
+            Write-Warning "CHANGELOG.md 里没有 $tag 章节，使用占位说明"
+            "本版说明见 CHANGELOG.md" | Set-Content RELEASE_BODY.md -Encoding UTF8
+          }
+
       # 同步到 Gitee（主渠道）。需要仓库 Secrets 里配置 GITEE_TOKEN；
       # 没配就自动跳过，continue-on-error 保证 Gitee 出问题不会影响 GitHub 发布。
       - name: Mirror to Gitee
@@ -105,7 +123,7 @@ jobs:
         shell: pwsh
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        run: ./scripts/gitee_release.ps1 -Tag $env:REL_TAG
+        run: ./scripts/gitee_release.ps1 -Tag $env:REL_TAG -BodyFile RELEASE_BODY.md
 
       # 打 tag 时发布 Release（GitHub 只是镜像渠道，主渠道仍是 Gitee）
       - name: Publish GitHub Release
@@ -117,10 +135,12 @@ jobs:
           # 手动触发时 tag 可能还不存在，让 action 在当前提交上创建它
           target_commitish: ${{ github.sha }}
           draft: false
-          generate_release_notes: true
+          # 发行说明取 CHANGELOG.md 对应章节
+          body_path: RELEASE_BODY.md
+          # MSIX 不放进 Release：本地自签名证书不受信任，
+          # 直接下载安装会报签名错误。商店提交用 Actions 里的 artifact。
           files: |
             x64/Release/FileEncryptor.exe
             x64/Release/enc.exe
             x64/Release/FileEncryptorSetup.exe
             x64/Release/SHA256SUMS.txt
-            x64/msix/FileEncryptor.msix

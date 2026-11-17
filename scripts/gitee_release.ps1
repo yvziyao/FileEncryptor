@@ -12,7 +12,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Tag,
     [string]$Owner = "yvziyao",
     [string]$Repo = "FileEncryptor",
-    [string]$TargetBranch = "master"
+    [string]$TargetBranch = "master",
+    [string]$BodyFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,8 +30,7 @@ $files = @(
     "x64/Release/FileEncryptor.exe",
     "x64/Release/enc.exe",
     "x64/Release/FileEncryptorSetup.exe",
-    "x64/Release/SHA256SUMS.txt",
-    "x64/msix/FileEncryptor.msix"
+    "x64/Release/SHA256SUMS.txt"
 ) | Where-Object { Test-Path $_ }
 
 Write-Host "待上传文件: $($files.Count) 个"
@@ -48,10 +48,16 @@ if ($existing) {
 }
 
 # ---------------------------------------------------------------- 2) 创建 release
+$notes = ""
+if ($BodyFile -and (Test-Path $BodyFile)) {
+    $notes = Get-Content $BodyFile -Raw -Encoding UTF8
+}
+if (-not $notes) { $notes = "自动构建产物（GitHub Actions 构建后同步）。" }
+
 $body = @{
     tag_name         = $Tag
     name             = "FileEncryptor $Tag"
-    body             = "自动构建产物（GitHub Actions 构建后同步）。便携版、安装程序、CLI 与 MSIX。"
+    body             = $notes
     target_commitish = $TargetBranch
     prerelease       = $false
 } | ConvertTo-Json -Compress
