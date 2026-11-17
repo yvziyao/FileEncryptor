@@ -2278,6 +2278,33 @@ void CycleFocus(UiDlgState* st, bool backwards) {
 
 // ---------------------------------------------------------------- 窗口过程
 
+// 该窗口是不是本进程"最前面"的弹窗？
+// 嵌套弹窗（设置 -> 警告 -> 结果）时，只有最上层那个才该晃，
+// 否则几个弹窗会一起抖，而且晃的往往不是用户正看着的那个。
+static bool IsFrontMostDialog(HWND self) {
+    for (HWND h = GetTopWindow(NULL); h; h = GetWindow(h, GW_HWNDNEXT)) {
+        wchar_t cls[64] = {};
+        GetClassNameW(h, cls, 64);
+        if (_wcsicmp(cls, UIDLG_CLASS) != 0) continue;
+        if (!IsWindowVisible(h)) continue;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        if (pid != GetCurrentProcessId()) continue;
+        return h == self;   // z 序第一个属于我们的弹窗就是最前面的
+    }
+    return false;
+}
+
+// 这个窗口（或其祖先）是不是我们自己的弹窗？
+static bool IsOurDialogWindow(HWND h) {
+    for (HWND w = h; w; w = GetParent(w)) {
+        wchar_t cls[64] = {};
+        GetClassNameW(w, cls, 64);
+        if (_wcsicmp(cls, UIDLG_CLASS) == 0) return true;
+    }
+    return false;
+}
+
 LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     UiDlgState* st = reinterpret_cast<UiDlgState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
@@ -2465,9 +2492,6 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         // 设置面板的自绘元素（复选框/胶囊）需要父窗口自己跟踪悬停：
         // 只在悬停目标变化时整窗重画，避免鼠标每动一下都重画。
-        if (!IsRectEmpty(&st->rCheckBox) &&
-            (PtInRect(&st->rCheckBox, pt) || PtInRect(&st->rCheckLabel, pt)))
-            return HTCLIENT;
         if (st->isSettings) {
             const int hot = SettingsHotItem(st, pt);
             if (hot != st->hotItem) {
@@ -2555,6 +2579,11 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 PtInRect(&st->rChkDecoyHelp, pt))
                 return HTCLIENT;
         }
+        // 「不再提示」复选框是父窗口自绘的：必须返回 HTCLIENT，
+        // 否则这段区域算标题栏，点击会变成拖动窗口，复选框永远点不动。
+        if (!IsRectEmpty(&st->rCheckBox) &&
+            (PtInRect(&st->rCheckBox, pt) || PtInRect(&st->rCheckLabel, pt)))
+            return HTCLIENT;
         if (st->isSettings) {
             for (const auto& r : st->rows) {
                 if (PtInRect(&r.segRc, pt)) return HTCLIENT;
@@ -2929,12 +2958,15 @@ LRESULT CALLBACK UiDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             static bool      s_lastDown = false;
             static ULONGLONG s_lastNag  = 0;
             const bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-            if (down && !s_lastDown && now - s_lastNag > 1200) {
+            // 只有"最前面的弹窗"才负责提醒：嵌套时其余弹窗直接跳过，
+            // 否则每个活着的弹窗都会各自晃一下（而且晃的不是用户在看的那一个）。
+            if (down && !s_lastDown && now - s_lastNag > 1200 && IsFrontMostDialog(hwnd)) {
                 POINT pt = {};
                 GetCursorPos(&pt);
                 HWND under = WindowFromPoint(pt);
-                const bool onDialog = (under == hwnd) || (under && IsChild(hwnd, under));
-                if (!onDialog && under) {
+                // 点在我们任何一个弹窗上都不算"绕过弹窗"
+                const bool onAnyDialog = IsOurDialogWindow(under);
+                if (!onAnyDialog && under) {
                     DWORD pid = 0;
                     GetWindowThreadProcessId(under, &pid);
                     if (pid == GetCurrentProcessId()) {
