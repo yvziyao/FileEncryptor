@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.0.0). Leave empty to just build artifacts.'
+        description: 'Release tag, e.g. v1.0.1. Fill it in to build AND publish a release; leave empty to only build artifacts.'
         required: false
 
 permissions:
@@ -17,6 +17,10 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    # 统一的"本次发布的 tag"：打 tag 推送时用 ref_name，手动触发时用输入值。
+    # 只有它形如 v* 才会发布 Release，否则只构建产物。
+    env:
+      REL_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,7 +59,7 @@ jobs:
       - name: Build MSIX
         shell: pwsh
         run: |
-          $v = "${{ github.ref_name }}" -replace '^v', ''
+          $v = $env:REL_TAG -replace '^v', ''
           if ($v -notmatch '^\d+\.\d+\.\d+$') {
             Write-Host "tag 不是 vX.Y.Z 形式，MSIX 版本回退为 1.0.0.0"
             $v = '1.0.0'
@@ -96,20 +100,22 @@ jobs:
       # 同步到 Gitee（主渠道）。需要仓库 Secrets 里配置 GITEE_TOKEN；
       # 没配就自动跳过，continue-on-error 保证 Gitee 出问题不会影响 GitHub 发布。
       - name: Mirror to Gitee
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(env.REL_TAG, 'v')
         continue-on-error: true
         shell: pwsh
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        run: ./scripts/gitee_release.ps1 -Tag ${{ github.ref_name }}
+        run: ./scripts/gitee_release.ps1 -Tag $env:REL_TAG
 
       # 打 tag 时发布 Release（GitHub 只是镜像渠道，主渠道仍是 Gitee）
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(env.REL_TAG, 'v')
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
+          name: ${{ env.REL_TAG }}
+          tag_name: ${{ env.REL_TAG }}
+          # 手动触发时 tag 可能还不存在，让 action 在当前提交上创建它
+          target_commitish: ${{ github.sha }}
           draft: false
           generate_release_notes: true
           files: |
