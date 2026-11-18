@@ -77,5 +77,3 @@ desktop.ini
 # Release 页文案：本地用 Markdown 编辑，但不上传仓库
 RELEASE_NOTES.txt
 
-# 宣传视频（由 scripts/make_promo_video.ps1 从 promo.html 生成，不入库）
-promo.mp4

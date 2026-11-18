@@ -311,27 +311,34 @@ const Cursor: React.FC<{ x: number; y: number; opacity?: number; down?: boolean 
 const DemoEncrypt: React.FC = () => {
   const frame = useCurrentFrame();
 
-  // 文件从右上角拖入
-  const dragT = interpolate(frame, [10, 45], [0, 1], clamp);
-  const dropDone = frame > 45;
+  // 节奏：拖入(8-38) -> 密码框(45-112) -> 点确定(122) -> 进度(130-195) -> 完成
+  const dragT = interpolate(frame, [8, 38], [0, 1], clamp);
+  const dropDone = frame > 38;
 
-  // 进度条（第 120 帧开始，210 帧走完）
-  const prog = dropDone ? interpolate(frame, [120, 210], [0, 100], clamp) : 0;
+  const prog = dropDone ? interpolate(frame, [155, 220], [0, 100], clamp) : 0;
 
-  // 对话框出现/消失
-  const dlgIn = spring({ frame: frame - 55, fps: 30, config: { damping: 16, mass: 0.7 } });
-  const dlgOut = interpolate(frame, [215, 230], [1, 0], clamp);
+  const dlgIn = spring({ frame: frame - 42, fps: 30, config: { damping: 16, mass: 0.7 } });
+  const dlgOut = interpolate(frame, [140, 152], [1, 0], clamp);
   const dlgOpacity = Math.min(1, dlgIn) * dlgOut;
 
-  // 密码打字
-  const pwd = typed('Tr0ub4dor&3', frame, 95, 11);
+  const pwd = typed('Tr0ub4dor&3', frame, 62, 10);
 
-  // 光标轨迹：拖文件 -> 移到密码框 -> 移到确定
-  const cx = interpolate(frame, [0, 45, 80, 105, 190, 215], [1560, 980, 960, 700, 760, 770], clamp);
-  const cy = interpolate(frame, [0, 45, 80, 105, 190, 215], [120, 470, 470, 520, 560, 560], clamp);
+  // 光标轨迹（舞台坐标；密码框/确定按钮的位置按对话框实际布局算出来的）
+  const cx = interpolate(
+    frame,
+    [0, 8, 38, 48, 58, 112, 122, 150],
+    [1640, 1580, 900, 900, 900, 900, 1061, 1061],
+    clamp
+  );
+  const cy = interpolate(
+    frame,
+    [0, 8, 38, 48, 58, 112, 122, 150],
+    [90, 120, 520, 512, 505, 505, 688, 688],
+    clamp
+  );
   const clickAt = (f: number) => (frame >= f && frame <= f + 5 ? 1 : 0);
-  const donePop = usePop(222);   // 必须在顶层调用，不能写在条件分支里
-  const winPop = usePop(8);
+  const donePop = usePop(228);   // 必须在顶层调用，不能写在条件分支里
+  const winPop = usePop(6);
 
   return (
     <Backdrop>
@@ -347,7 +354,7 @@ const DemoEncrypt: React.FC = () => {
         <div style={{ position: 'absolute', left: '50%', top: '50%', transform: `translate(-50%,-50%) scale(${winPop.k})`, opacity: winPop.opacity }}>
           <WinFrame w={760} h={300} title="文件加密工具">
             <div style={{ padding: '42px 44px', display: 'flex', gap: 36, justifyContent: 'center', alignItems: 'center' }}>
-              <AppButton label="加密文件" press={dropDone ? interpolate(frame, [110, 118, 128], [0, 1, 0], clamp) : 0} />
+              <AppButton label="加密文件" press={dropDone ? interpolate(frame, [128, 134, 144], [0, 1, 0], clamp) : 0} />
               <AppButton label="解密文件" press={0} />
               <AppButton label="安全删除" primary={false} press={0} />
             </div>
@@ -450,7 +457,7 @@ const DemoEncrypt: React.FC = () => {
         )}
 
         {/* 完成提示 */}
-        {frame > 222 && (
+        {frame > 228 && (
           <div
             style={{
               position: 'absolute',
@@ -712,7 +719,7 @@ const Outro: React.FC = () => {
 const D = {
   intro: 130,
   problem: 150,
-  demoEncrypt: 780,
+  demoEncrypt: 340,
   deniable: 330,
   demoDelete: 240,
   demoCli: 300,
