@@ -77,3 +77,7 @@ desktop.ini
 # Release 页文案：本地用 Markdown 编辑，但不上传仓库
 RELEASE_NOTES.txt
 
+
+# 宣传视频及其工程（本地保留，不入库）
+promo.mp4
+promo-video/
