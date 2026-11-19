@@ -39,6 +39,15 @@ function Find-SdkTool([string]$name) {
 
 $makeappx = Find-SdkTool "makeappx.exe"
 $signtool = Find-SdkTool "signtool.exe"
+# Microsoft Store 要求清单版本号的**最后一位（revision）必须是 0**，
+# 例如 1.0.2.0 可以、1.0.2.5 会被拒：
+#   "不允许应用在应用清单中指定版本号不为零的版本"
+$parts = $Version.Split('.')
+if ($parts.Count -ne 4) { throw "版本号必须是四段，例如 1.0.3.0（当前: $Version）" }
+if ([int]$parts[3] -ne 0) {
+    throw "版本号最后一位必须为 0（Microsoft Store 规则），当前为 $Version —— 请改成 $($parts[0]).$($parts[1]).$([int]$parts[2] + 1).0"
+}
+
 if (-not $makeappx) { throw "找不到 makeappx.exe（需安装 Windows 10/11 SDK）" }
 if (-not $signtool) { throw "找不到 signtool.exe（需安装 Windows 10/11 SDK）" }
 Write-Host "makeappx: $makeappx"
