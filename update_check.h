@@ -15,7 +15,7 @@
 #include <string>
 
 // 仅用于显示（滚动更新下 tag 是固定的 v1.0.0，不参与判断）
-#define FE_APP_VERSION L"1.0.2"
+#define FE_APP_VERSION L"1.0.3"
 
 struct UpdateCheckResult {
     bool         ok = false;           // 网络/下载/解析是否成功

@@ -287,7 +287,7 @@ void WriteUninstallInfo(const std::wstring& dir) {
                        (DWORD)((v.size() + 1) * sizeof(wchar_t)));
     };
     setSz(L"DisplayName", L"FileEncryptor");
-    setSz(L"DisplayVersion", L"1.0.2");     // 发版时与 FE_APP_VERSION 一起改
+    setSz(L"DisplayVersion", L"1.0.3");     // 发版时与 FE_APP_VERSION 一起改
     setSz(L"Publisher", L"虞子尧");
     setSz(L"DisplayIcon", exe);
     setSz(L"InstallLocation", dir);
